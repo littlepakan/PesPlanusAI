@@ -19,7 +19,7 @@ app = FastAPI(title="Pes Planus AI API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False, # แก้เป็น False (กลับมาเป็น True) เพื่อความปลอดภัยใน Production
     allow_methods=["*"],
     allow_headers=["*"],
 )
