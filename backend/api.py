@@ -15,6 +15,9 @@ import xgboost
 import asyncio
 
 app = FastAPI(title="Pes Planus AI API")
+@app.get("/")
+def read_root():
+    return {"message": "Pes Planus API is running perfectly! (FastAPI default CORS enabled)"}
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +29,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+@app.get("/")
+def read_root():
+    return {"message": "Pes Planus API is running perfectly! (Middleware CORS enabled)"}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
