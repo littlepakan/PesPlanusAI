@@ -18,8 +18,11 @@ app = FastAPI(title="Pes Planus AI API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False, # แก้เป็น False (กลับมาเป็น True) เพื่อความปลอดภัยใน Production
+    allow_origins=[
+        "https://pes-planus-ai.vercel.app",  # อนุญาตให้เว็บ Vercel ของคุณเข้าถึงได้
+        "http://localhost:3000",             # เผื่อไว้ทดสอบในเครื่องตัวเอง
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
