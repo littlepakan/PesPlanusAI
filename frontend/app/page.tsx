@@ -168,8 +168,7 @@ export default function Home() {
       }
       if (gtOption === "upload" && csvFile)
         formData.append("csv_file", csvFile);
-      // fetch("https://pesplanus.onrender.com/api/predict", {
-      fetch("http://localhost:8000/api/predict", {
+      fetch("https://pesplanusai.onrender.com/api/predict", {
         method: "POST",
         body: formData,
         signal: abortController.signal,
