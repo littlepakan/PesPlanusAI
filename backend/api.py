@@ -19,20 +19,21 @@ app = FastAPI(title="Pes Planus AI API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://pes-planus-ai.vercel.app",  # อนุญาตให้เว็บ Vercel ของคุณเข้าถึงได้
-        "http://localhost:3000",             # เผื่อไว้ทดสอบในเครื่องตัวเอง
+        "https://pes-planus-ai.vercel.app",  
+        "http://localhost:3000",             
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 @app.get("/")
 def read_root():
     return {"message": "Pes Planus API is running perfectly!"}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ตัวแปร Global สำหรับเก็บ Caching เพื่อความรวดเร็ว
+# ตัวแปร Global สำหรับเก็บ Caching 
 model_lock = asyncio.Lock()
 global_state = {
     "model_name": None,
@@ -43,22 +44,42 @@ global_state = {
     "gt_map": {}
 }
 
-# 🌟 ฟังก์ชันกรองเฉพาะคอลัมน์ที่จำเป็นใน CSV (ประหยัด RAM)
-def valid_csv_cols(col_name):
-    valid_names = ['img_name', 'img', 'filename', 'image_name', 'name', 'label']
-    return col_name in valid_names
-
-# ฟังก์ชันดึงค่าจาก DataFrame มาทำ Mapping
+# 🌟 ฟังก์ชันดึงค่าจาก DataFrame โดยเน้น Img_name และ Label เป็นหลัก
 def parse_csv_dataframe(df: pd.DataFrame):
-    img_col = next((col for col in ['img_name', 'img', 'filename', 'image_name', 'name'] if col in df.columns), None)
+    # 1. แปลงชื่อคอลัมน์เป็นตัวพิมพ์เล็กและลบเว้นวรรค
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    
+    # 2. ค้นหาคอลัมน์ชื่อภาพ (เน้น img_name ก่อน)
+    img_col = next((col for col in ['img_name', 'img', 'filename', 'image_name', 'name', 'path'] if col in df.columns), None)
+    # 3. ค้นหาคอลัมน์เฉลย (เน้น label ก่อน)
+    label_col = next((col for col in ['label', 'imglabel', 'classification', 'class'] if col in df.columns), None)
+    
     gt_map = {}
-    if img_col and 'label' in df.columns:
+    if img_col and label_col:
         for _, row in df.iterrows():
-            rname = str(row[img_col]).strip()
+            if pd.isna(row[img_col]) or pd.isna(row[label_col]):
+                continue
+            
+            # นำชื่อไฟล์จาก CSV มาลบช่องว่างและแปลงเป็นตัวพิมพ์เล็ก
+            rname = str(row[img_col]).strip().lower()
             b_rname = os.path.splitext(rname)[0]
-            lbl = int(row['label'])
+            
+            raw_lbl = str(row[label_col]).strip().lower()
+            
+            # แปลงค่า Label ให้อยู่ในรูปแบบ 0 หรือ 1
+            if raw_lbl in ['1', '1.0', 'flatfoot', 'pesplanus', 'pes planus', 'true']:
+                lbl = 1
+            elif raw_lbl in ['0', '0.0', 'normal', 'false']:
+                lbl = 0
+            else:
+                try:
+                    lbl = int(float(raw_lbl))
+                except ValueError:
+                    continue
+            
             gt_map[rname] = lbl
             gt_map[b_rname] = lbl
+            
     return gt_map
 
 # ฟังก์ชันจัดการ Preprocessing (Filter)
@@ -86,7 +107,7 @@ def get_transforms(model_name: str, filter_type: str):
 
 @app.post("/api/predict")
 async def predict_single_image(
-    file: UploadFile = File(...), # 🌟 เปลี่ยนกลับมารับไฟล์เดียว เพื่อให้รองรับการกดยกเลิกแบบ Real-time
+    file: UploadFile = File(...), 
     backbone: str = Form(...),
     classifier: str = Form(...),
     filter_type: str = Form("Median Filter"),
@@ -97,7 +118,7 @@ async def predict_single_image(
     csv_file: Optional[UploadFile] = File(None)
 ):
     try:
-        # 1. จัดการโมเดลและไฟล์ CSV ภายใต้ Lock (กันพังเวลายิงรัวๆ พร้อมกัน)
+        # 1. จัดการโมเดลและไฟล์ CSV ภายใต้ Lock
         async with model_lock:
             # --- โหลดโมเดล ---
             if classifier == "Fine-Tuning":
@@ -112,7 +133,7 @@ async def predict_single_image(
                         model.fc = nn.Sequential(nn.Dropout(p=0.5), nn.Linear(1024, 2))
                     
                     weight_bytes = await weight_file.read()
-                    model.load_state_dict(torch.load(io.BytesIO(weight_bytes), map_location=device))
+                    model.load_state_dict(torch.load(io.BytesIO(weight_bytes), map_location=device, weights_only=False))
                     model.to(device)
                     model.eval()
                     
@@ -140,41 +161,18 @@ async def predict_single_image(
                     global_state["model"] = model
                     global_state["model_name"] = clf_file.filename
 
-            # --- อ่านไฟล์เฉลย CSV (ใช้ usecols) ---
+            # --- อ่านไฟล์เฉลย CSV (เฉพาะไฟล์ที่อัปโหลดขึ้นมา) ---
             if gt_option == "upload" and csv_file:
                 if global_state["csv_key"] != f"upload_{csv_file.filename}":
                     try:
                         csv_bytes = await csv_file.read()
-                        df_gt = pd.read_csv(io.BytesIO(csv_bytes), usecols=valid_csv_cols)
+                        df_gt = pd.read_csv(io.BytesIO(csv_bytes))
                         global_state["gt_map"] = parse_csv_dataframe(df_gt)
                         global_state["csv_key"] = f"upload_{csv_file.filename}"
                     except Exception as e:
                         print(f"CSV Parse Error: {e}")
                         raise HTTPException(status_code=500, detail=f"อ่านไฟล์ CSV ที่อัปโหลดไม่สำเร็จ: {str(e)}")
-            elif gt_option == "default":
-                if global_state["csv_key"] != "default":
-                    # แก้ไขให้อ้างอิงพาธจากตำแหน่งไฟล์ api.py
-                    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-                    csv_files = [f for f in os.listdir(BASE_DIR) if f.endswith(".csv")]
-                    
-                    if csv_files:
-                        try:
-                            csv_path = os.path.join(BASE_DIR, csv_files[0])
-                            df_gt = pd.read_csv(csv_path, usecols=valid_csv_cols)
-                            global_state["gt_map"] = parse_csv_dataframe(df_gt)
-                            global_state["csv_key"] = "default"
-                        except Exception as e:
-                            print(f"Default CSV Error: {e}")
-                            raise HTTPException(status_code=500, detail=f"เกิดข้อผิดพลาดในการอ่านไฟล์ CSV: {str(e)}")
-                    else:
-                        global_state["gt_map"] = {}
-                        global_state["csv_key"] = "none"
-                        # แจ้งเตือน Error ชัดเจนหากไม่พบไฟล์ .csv บน Production (Render)
-                        raise HTTPException(
-                            status_code=404, 
-                            detail="ไม่พบไฟล์เฉลย (.csv) สำหรับค่า Default บนเซิร์ฟเวอร์ กรุณาอัปโหลดไฟล์ขึ้นไปยัง Render"
-                        )
-            else: # none
+            else: 
                 global_state["gt_map"] = {}
                 global_state["csv_key"] = "none"
 
@@ -205,8 +203,9 @@ async def predict_single_image(
                 prob = float(prediction_result)
 
         # 3. เช็กความถูกต้องกับเฉลย
-        fname = file.filename
+        fname = str(file.filename).strip().lower()
         bname = os.path.splitext(fname)[0]
+        
         gt_label = None
         eval_status = "ไม่มีเฉลย"
 
@@ -223,7 +222,7 @@ async def predict_single_image(
         # ส่งผลลัพธ์กลับ
         return {
             "id": file.filename, 
-            "filename": fname,
+            "filename": file.filename,
             "prediction_class": "Pes Planus (1)" if prediction_result == 1 else "Normal (0)",
             "prediction_code": prediction_result,
             "confidence": f"{prob:.4f}",
@@ -232,7 +231,8 @@ async def predict_single_image(
         }
 
     except HTTPException:
-        # เพื่อให้ส่ง HTTP Error แบบเจาะจงที่เราสร้างไว้กลับไปได้เลย
         raise
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
