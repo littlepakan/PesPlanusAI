@@ -191,9 +191,10 @@ export default function Home() {
     if (!isFineTuning && rfeFile) formData.append("rfe_file", rfeFile);
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
-    // 🌟 ดึง URL จาก Environment Variable ถ้าตั้งไว้ หรือ fallback เป็น Render URL (เพื่อความยืดหยุ่น)
+    // 🌟 สลับ URL ตามการใช้งาน (เลือกเปิดอันนึง ปิดอันนึง)
+    // const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; // สำหรับรันเทสบนเครื่อง
     const API_URL =
-      process.env.NEXT_PUBLIC_API_URL || "https://pes-planus-api.onrender.com";
+      process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com"; // สำหรับขึ้น Deploy จริง
 
     try {
       const response = await fetch(`${API_URL}/api/predict`, {
@@ -202,11 +203,16 @@ export default function Home() {
         signal: controller.signal,
       });
 
+      // 🌟 แก้ไขบล็อกนี้เพื่อแปลง Object Error ให้เป็นข้อความที่อ่านได้
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
-        throw new Error(
-          errData.detail || `HTTP error! status: ${response.status}`,
-        );
+        let errMsg = errData.detail || `HTTP error! status: ${response.status}`;
+
+        // ถ้า Error ที่ส่งมาเป็น Object/Array ให้แปลงเป็น String
+        if (typeof errMsg !== "string") {
+          errMsg = JSON.stringify(errMsg);
+        }
+        throw new Error(errMsg);
       }
 
       // 🌟 รับผลลัพธ์มาเป็น Array แล้วจับคู่ด้วยชื่อไฟล์
@@ -704,13 +710,6 @@ export default function Home() {
                       <p className="font-semibold text-gray-800 dark:text-gray-200 truncate">
                         {task.file.name}
                       </p>
-
-                      {task.status === "processing" && (
-                        <p className="text-blue-500 flex items-center gap-1">
-                          <span className="animate-spin">⏳</span>{" "}
-                          กำลังวิเคราะห์...
-                        </p>
-                      )}
 
                       {task.status === "error" && (
                         <p className="text-red-500">
