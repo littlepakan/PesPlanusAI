@@ -13,6 +13,7 @@ type ImageTask = {
 export default function Home() {
   const [tasks, setTasks] = useState<ImageTask[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [progressCount, setProgressCount] = useState(0); // 🌟 ตัวนับสถานะใหม่
 
   const [weightFile, setWeightFile] = useState<File | null>(null);
   const [clfFile, setClfFile] = useState<File | null>(null);
@@ -116,6 +117,7 @@ export default function Home() {
   const clearAllTasks = () => {
     tasks.forEach((t) => t.controller?.abort());
     setTasks([]);
+    setProgressCount(0);
   };
 
   const isFineTuning = classifier === "Fine-Tuning";
@@ -164,7 +166,7 @@ export default function Home() {
 
     const controller = new AbortController();
 
-    // ตั้งสถานะเป็น processing ทั้งหมดทันที
+    setProgressCount(0);
     setTasks((prev) =>
       prev.map((t) =>
         targetTasks.some((tt) => tt.id === t.id)
@@ -174,8 +176,6 @@ export default function Home() {
     );
 
     const formData = new FormData();
-
-    // 🌟 ยัดไฟล์ภาพทั้งหมดลงไปใน FormData ครั้งเดียว!
     targetTasks.forEach((task) => {
       formData.append("files", task.file);
     });
@@ -192,9 +192,8 @@ export default function Home() {
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
     // 🌟 สลับ URL ตามการใช้งาน (เลือกเปิดอันนึง ปิดอันนึง)
-    // const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; // สำหรับรันเทสบนเครื่อง
-    const API_URL =
-      process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com"; // สำหรับขึ้น Deploy จริง
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; // สำหรับรันเทสบนเครื่อง
+    // const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com"; // สำหรับขึ้น Deploy จริง
 
     try {
       const response = await fetch(`${API_URL}/api/predict`, {
@@ -203,42 +202,47 @@ export default function Home() {
         signal: controller.signal,
       });
 
-      // 🌟 แก้ไขบล็อกนี้เพื่อแปลง Object Error ให้เป็นข้อความที่อ่านได้
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
         let errMsg = errData.detail || `HTTP error! status: ${response.status}`;
-
-        // ถ้า Error ที่ส่งมาเป็น Object/Array ให้แปลงเป็น String
         if (typeof errMsg !== "string") {
           errMsg = JSON.stringify(errMsg);
         }
         throw new Error(errMsg);
       }
 
-      // 🌟 รับผลลัพธ์มาเป็น Array แล้วจับคู่ด้วยชื่อไฟล์
-      const dataArray = await response.json();
+      // 🌟 อ่านข้อมูลแบบ Stream (รับทีละชิ้น)
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder("utf-8");
 
-      setTasks((prev) =>
-        prev.map((t) => {
-          if (targetTasks.some((tt) => tt.id === t.id)) {
-            const res = dataArray.find((r: any) => r.filename === t.file.name);
-            if (res)
-              return {
-                ...t,
-                status: "success",
-                result: res,
-                controller: undefined,
-              };
-            return {
-              ...t,
-              status: "error",
-              result: { error: "ไม่ได้รับผลลัพธ์จากเซิร์ฟเวอร์" },
-              controller: undefined,
-            };
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split("\n").filter((line) => line.trim() !== "");
+
+          for (const line of lines) {
+            const res = JSON.parse(line);
+
+            // อัปเดตตัวนับและสถานะของรูปนั้นทันที
+            setProgressCount((prev) => prev + 1);
+            setTasks((prev) =>
+              prev.map((t) =>
+                t.file.name === res.filename
+                  ? {
+                      ...t,
+                      status: "success",
+                      result: res,
+                      controller: undefined,
+                    }
+                  : t,
+              ),
+            );
           }
-          return t;
-        }),
-      );
+        }
+      }
     } catch (error: any) {
       if (error.name === "AbortError") {
         setTasks((prev) =>
@@ -528,7 +532,9 @@ export default function Home() {
             >
               {isProcessingAny ? (
                 <>
-                  <span className="animate-spin">⏳</span> กำลังประมวลผลภาพ...
+                  {/* 🌟 เพิ่มตัวนับ progressCount */}
+                  <span className="animate-spin">⏳</span> กำลังประมวลผล... (
+                  {progressCount}/{tasks.length})
                 </>
               ) : idleCount > 0 ? (
                 <>
@@ -710,6 +716,8 @@ export default function Home() {
                       <p className="font-semibold text-gray-800 dark:text-gray-200 truncate">
                         {task.file.name}
                       </p>
+
+                      {/* 🌟 ลบข้อความ "กำลังวิเคราะห์..." ออกจากตรงนี้แล้ว ทำให้ดูคลีนขึ้น */}
 
                       {task.status === "error" && (
                         <p className="text-red-500">

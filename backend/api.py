@@ -1,4 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, List
 import torch
@@ -14,6 +15,7 @@ import pandas as pd
 import xgboost 
 import asyncio
 import gc
+import json
 
 app = FastAPI(title="Pes Planus AI API")
 
@@ -31,7 +33,7 @@ def read_root():
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 🌟 โครงสร้าง SimpleNN ที่ปรับแต่งตามเปเปอร์ (แก้ปัญหา Missing Key Error)
+# 🌟 โครงสร้าง SimpleNN ที่ปรับแต่งตามเปเปอร์
 class SimpleNN(nn.Module):
     def __init__(self):
         super(SimpleNN, self).__init__()
@@ -112,12 +114,12 @@ async def predict_batch_images(
     csv_file: Optional[UploadFile] = File(None)
 ):
     try:
+        # เตรียม Model ให้พร้อมก่อนเริ่มวิเคราะห์
         async with model_lock:
-            # --- 1. โหมด Fine-Tuning (.pth ตัวเดียว) ---
+            # --- 1. โหมด Fine-Tuning ---
             if classifier == "Fine-Tuning":
                 if not weight_file:
                     raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์ Weights (.pth) สำหรับ Fine-Tuning")
-                
                 current_key = f"FT_{backbone}_{weight_file.filename}"
                 if global_state["model_key"] != current_key:
                     w_bytes = await weight_file.read()
@@ -127,33 +129,25 @@ async def predict_batch_images(
                     else:
                         model = models.squeezenet1_1()
                         model.classifier = nn.Sequential(nn.Dropout(p=0.5), nn.Conv2d(512, 2, kernel_size=(1, 1)), nn.ReLU(inplace=True), nn.AdaptiveAvgPool2d((1, 1)), nn.Flatten())
-                    
                     try:
                         model.load_state_dict(torch.load(io.BytesIO(w_bytes), map_location=device, weights_only=False))
                     except Exception as e:
                         err_str = str(e)
                         if "Missing key(s)" in err_str or "Unexpected key(s)" in err_str or "size mismatch" in err_str:
-                            raise HTTPException(
-                                status_code=400, 
-                                detail=f"ไฟล์ Weights (.pth) ไม่ตรงกับ Backbone ที่เลือก! คุณเลือก [{backbone}] แต่ไฟล์ที่อัปโหลดไม่ใช่โครงสร้างของโมเดลนี้"
-                            )
-                        raise HTTPException(status_code=400, detail=f"ไม่สามารถโหลดไฟล์โมเดลได้: {err_str}")
-
+                            raise HTTPException(status_code=400, detail=f"ไฟล์ Weights ไม่ตรงกับ Backbone! คุณเลือก [{backbone}]")
+                        raise HTTPException(status_code=400, detail=f"โหลดโมเดลไม่สำเร็จ: {err_str}")
                     global_state["ft_model"] = model.to(device).eval()
                     global_state["model_key"] = current_key
 
-            # --- 2. โหมด Neural Network (ใช้ไฟล์ .pth + RFE Selector .pkl) ---
+            # --- 2. โหมด Neural Network ---
             elif classifier == "NeuralNetwork":
                 if not weight_file or not rfe_file:
-                    raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์ Weights (.pth) และ RFE Selector (.pkl) ให้ครบถ้วน")
-                
+                    raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์ Weights และ RFE ให้ครบถ้วน")
                 current_key = f"NN_{backbone}_{weight_file.filename}_{rfe_file.filename}"
                 if global_state["model_key"] != current_key:
                     w_bytes = await weight_file.read()
                     rfe_bytes = await rfe_file.read()
-                    
                     global_state["rfe"] = pickle.loads(rfe_bytes)
-
                     if backbone == "GoogleNet":
                         feat_ext = models.googlenet(weights=models.GoogLeNet_Weights.DEFAULT)
                         feat_ext.fc = nn.Identity()
@@ -167,35 +161,26 @@ async def predict_batch_images(
                             def forward(self, x):
                                 return torch.flatten(self.pool(self.features(x)), 1)
                         feat_ext = SqueezeNetExtractor()
-                    
                     global_state["feature_extractor"] = feat_ext.to(device).eval()
-
                     nn_model = SimpleNN()
-                    
                     try:
                         nn_model.load_state_dict(torch.load(io.BytesIO(w_bytes), map_location=device, weights_only=False))
                     except Exception as e:
                         err_str = str(e)
                         if "Missing key(s)" in err_str or "Unexpected key(s)" in err_str or "size mismatch" in err_str:
-                            raise HTTPException(
-                                status_code=400, 
-                                detail=f"ไฟล์ Weights (.pth) ไม่ตรงกับ Classifier ที่เลือก! คุณเลือก [{backbone}] แต่ไฟล์ .pth ที่อัปโหลดไม่รองรับ"
-                            )
-                        raise HTTPException(status_code=400, detail=f"ไม่สามารถโหลดไฟล์โมเดลได้: {err_str}")
-
+                            raise HTTPException(status_code=400, detail=f"ไฟล์ Weights ไม่ตรงกับ Classifier! เลือก [{backbone}]")
+                        raise HTTPException(status_code=400, detail=f"โหลดโมเดลไม่สำเร็จ: {err_str}")
                     global_state["nn_model"] = nn_model.to(device).eval()
                     global_state["model_key"] = current_key
 
-            # --- 3. โหมด Machine Learning (SVM, XGBoost, RF, DT ใช้ .pkl + RFE) ---
+            # --- 3. โหมด ML (SVM, XGBoost, RF, DT) ---
             else:
                 if not clf_file or not rfe_file:
-                    raise HTTPException(status_code=400, detail="กรุณาอัปโหลดไฟล์ Classifier (.pkl) และ RFE Selector (.pkl)")
-                
+                    raise HTTPException(status_code=400, detail="กรุณาอัปโหลด Classifier (.pkl) และ RFE Selector (.pkl)")
                 current_key = f"ML_{backbone}_{classifier}_{clf_file.filename}_{rfe_file.filename}"
                 if global_state["model_key"] != current_key:
                     global_state["ml_model"] = pickle.loads(await clf_file.read())
                     global_state["rfe"] = pickle.loads(await rfe_file.read())
-
                     if backbone == "GoogleNet":
                         feat_ext = models.googlenet(weights=models.GoogLeNet_Weights.DEFAULT)
                         feat_ext.fc = nn.Identity()
@@ -209,7 +194,6 @@ async def predict_batch_images(
                             def forward(self, x):
                                 return torch.flatten(self.pool(self.features(x)), 1)
                         feat_ext = SqueezeNetExtractor()
-                    
                     global_state["feature_extractor"] = feat_ext.to(device).eval()
                     global_state["model_key"] = current_key
 
@@ -223,84 +207,84 @@ async def predict_batch_images(
                 global_state["gt_map"] = {}
                 global_state["csv_key"] = "none"
 
-        # 🌟 ทำนายผลทีละรูป จากรายการไฟล์ที่ส่งมาพร้อมกัน
-        results = []
-        for file in files:
-            contents = await file.read()
-            image = Image.open(io.BytesIO(contents)).convert('RGB')
-            img_tensor = get_transforms(backbone, filter_type)(image).unsqueeze(0).to(device)
+        # 🌟 ฟังก์ชัน Generator ทำหน้าที่ประมวลผลและทยอยส่งกลับ (Yield)
+        async def process_and_yield():
+            async with model_lock: # ป้องกัน Request อื่นมาแทรกจน RAM ล้น
+                for file in files:
+                    contents = await file.read()
+                    image = Image.open(io.BytesIO(contents)).convert('RGB')
+                    img_tensor = get_transforms(backbone, filter_type)(image).unsqueeze(0).to(device)
 
-            if classifier == "Fine-Tuning":
-                with torch.no_grad():
-                    outputs = global_state["ft_model"](img_tensor)
-                    _, preds = torch.max(outputs.data, 1)
-                    prob = torch.softmax(outputs, dim=1)[:, 1].item()
-                    prediction_result = preds.item()
+                    if classifier == "Fine-Tuning":
+                        with torch.no_grad():
+                            outputs = global_state["ft_model"](img_tensor)
+                            _, preds = torch.max(outputs.data, 1)
+                            prob = torch.softmax(outputs, dim=1)[:, 1].item()
+                            prediction_result = preds.item()
+                    elif classifier == "NeuralNetwork":
+                        with torch.no_grad():
+                            features = global_state["feature_extractor"](img_tensor).cpu().numpy()
+                        features_opt = global_state["rfe"].transform(features)
+                        with torch.no_grad():
+                            feats_tensor = torch.FloatTensor(features_opt).to(device)
+                            outputs = global_state["nn_model"](feats_tensor)
+                            _, preds = torch.max(outputs.data, 1)
+                            prob = torch.softmax(outputs, dim=1)[:, 1].item()
+                            prediction_result = preds.item()
+                    else:
+                        with torch.no_grad():
+                            features = global_state["feature_extractor"](img_tensor).cpu().numpy()
+                        features_opt = global_state["rfe"].transform(features)
+                        prediction_result = int(global_state["ml_model"].predict(features_opt)[0])
+                        prob = float(prediction_result)
+                        if hasattr(global_state["ml_model"], "predict_proba"):
+                            try:
+                                prob = float(global_state["ml_model"].predict_proba(features_opt)[0][1])
+                            except TypeError as e:
+                                if "validate_features" in str(e) and classifier == "XGBoost":
+                                    dtest = xgboost.DMatrix(features_opt)
+                                    prob_raw = global_state["ml_model"].get_booster().predict(dtest)
+                                    prob = float(prob_raw[0])
+                                else:
+                                    prob = float(prediction_result)
+
+                    # เช็กกับ Ground Truth
+                    fname = str(file.filename).strip().lower()
+                    bname = os.path.splitext(fname)[0]
+                    gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
                     
-            elif classifier == "NeuralNetwork":
-                with torch.no_grad():
-                    features = global_state["feature_extractor"](img_tensor).cpu().numpy()
-                features_opt = global_state["rfe"].transform(features)
-                
-                with torch.no_grad():
-                    feats_tensor = torch.FloatTensor(features_opt).to(device)
-                    outputs = global_state["nn_model"](feats_tensor)
-                    _, preds = torch.max(outputs.data, 1)
-                    prob = torch.softmax(outputs, dim=1)[:, 1].item()
-                    prediction_result = preds.item()
+                    eval_status = "ไม่มีเฉลย"
+                    if gt_label is not None:
+                        if gt_label == 1 and prediction_result == 1: eval_status = "True Positive (TP)"
+                        elif gt_label == 0 and prediction_result == 0: eval_status = "True Negative (TN)"
+                        elif gt_label == 0 and prediction_result == 1: eval_status = "False Positive (FP)"
+                        elif gt_label == 1 and prediction_result == 0: eval_status = "False Negative (FN)"
+
+                    result_dict = {
+                        "id": file.filename, 
+                        "filename": file.filename,
+                        "prediction_class": "Pes Planus (1)" if prediction_result == 1 else "Normal (0)",
+                        "prediction_code": prediction_result,
+                        "confidence": prob,
+                        "ground_truth": "Pes Planus (1)" if gt_label == 1 else ("Normal (0)" if gt_label == 0 else "-"),
+                        "eval_status": eval_status
+                    }
+
+                    # ส่งผลลัพธ์รูปนี้กลับไปที่ Frontend ทันที
+                    yield json.dumps(result_dict) + "\n"
+
+                    # คืนพื้นที่ RAM ทันทีหลังทำนายเสร็จในแต่ละรอบ
+                    if 'img_tensor' in locals(): del img_tensor
+                    if 'features' in locals(): del features
+                    if 'features_opt' in locals(): del features_opt
+                    if 'outputs' in locals(): del outputs
                     
-            else:
-                with torch.no_grad():
-                    features = global_state["feature_extractor"](img_tensor).cpu().numpy()
-                features_opt = global_state["rfe"].transform(features)
-                
-                prediction_result = int(global_state["ml_model"].predict(features_opt)[0])
-                
-                prob = float(prediction_result)
-                if hasattr(global_state["ml_model"], "predict_proba"):
-                    try:
-                        prob = float(global_state["ml_model"].predict_proba(features_opt)[0][1])
-                    except TypeError as e:
-                        if "validate_features" in str(e) and classifier == "XGBoost":
-                            dtest = xgboost.DMatrix(features_opt)
-                            prob_raw = global_state["ml_model"].get_booster().predict(dtest)
-                            prob = float(prob_raw[0])
-                        else:
-                            prob = float(prediction_result)
+                    gc.collect() 
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
 
-            # เช็กกับ Ground Truth
-            fname = str(file.filename).strip().lower()
-            bname = os.path.splitext(fname)[0]
-            gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
-            
-            eval_status = "ไม่มีเฉลย"
-            if gt_label is not None:
-                if gt_label == 1 and prediction_result == 1: eval_status = "True Positive (TP)"
-                elif gt_label == 0 and prediction_result == 0: eval_status = "True Negative (TN)"
-                elif gt_label == 0 and prediction_result == 1: eval_status = "False Positive (FP)"
-                elif gt_label == 1 and prediction_result == 0: eval_status = "False Negative (FN)"
-
-            results.append({
-                "id": file.filename, 
-                "filename": file.filename,
-                "prediction_class": "Pes Planus (1)" if prediction_result == 1 else "Normal (0)",
-                "prediction_code": prediction_result,
-                "confidence": prob,
-                "ground_truth": "Pes Planus (1)" if gt_label == 1 else ("Normal (0)" if gt_label == 0 else "-"),
-                "eval_status": eval_status
-            })
-
-            # คืนพื้นที่ RAM ทันทีหลังทำนายเสร็จในแต่ละรอบ
-            if 'img_tensor' in locals(): del img_tensor
-            if 'features' in locals(): del features
-            if 'features_opt' in locals(): del features_opt
-            if 'outputs' in locals(): del outputs
-
-        gc.collect() 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        return results # คืนค่าผลลัพธ์ทั้งหมดกลับไปในรอบเดียว
+        # 🌟 ใช้ StreamingResponse สำหรับตอบกลับแบบ Real-time
+        return StreamingResponse(process_and_yield(), media_type="application/x-ndjson")
 
     except HTTPException:
         raise
