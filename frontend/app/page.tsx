@@ -192,8 +192,9 @@ export default function Home() {
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
     // 🌟 สลับ URL ตามการใช้งาน (เลือกเปิดอันนึง ปิดอันนึง)
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; // สำหรับรันเทสบนเครื่อง
-    // const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com"; // สำหรับขึ้น Deploy จริง
+    // const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"; // สำหรับรันเทสบนเครื่อง
+    const API_URL =
+      process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com"; // สำหรับขึ้น Deploy จริง
 
     try {
       const response = await fetch(`${API_URL}/api/predict`, {
