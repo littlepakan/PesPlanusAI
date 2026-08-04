@@ -191,11 +191,15 @@ export default function Home() {
       if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
       try {
-        const response = await fetch("http://localhost:8000/api/predict", {
-          method: "POST",
-          body: formData,
-          signal: controller.signal,
-        });
+        const response = await fetch(
+          "https://pes-planus-api.onrender.com/api/predict",
+          {
+            // const response = await fetch("http://localhost:8000/api/predict", {
+            method: "POST",
+            body: formData,
+            signal: controller.signal,
+          },
+        );
 
         if (!response.ok) {
           const errData = await response.json().catch(() => ({}));
