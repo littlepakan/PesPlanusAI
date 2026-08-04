@@ -118,8 +118,10 @@ export default function Home() {
     setTasks([]);
   };
 
-  const needsPthFile =
-    classifier === "Fine-Tuning" || classifier === "NeuralNetwork";
+  // 🌟 เงื่อนไขเช็คประเภทของ Classifier ให้ชัดเจนขึ้น
+  const isFineTuning = classifier === "Fine-Tuning";
+  const isNeuralNetwork = classifier === "NeuralNetwork";
+  const isHybridML = !isFineTuning && !isNeuralNetwork;
 
   const processAllTasks = async (forceReprocess = false) => {
     const targetTasks = forceReprocess
@@ -133,24 +135,34 @@ export default function Home() {
 
     if (targetTasks.length === 0) return;
 
-    if (needsPthFile && !weightFile) {
-      alert(`กรุณาอัปโหลดไฟล์ Weights (.pth) สำหรับ ${classifier}`);
+    // 🌟 แจ้งเตือนการอัปโหลดไฟล์ให้ตรงกับแต่ละโหมด
+    if (isFineTuning && !weightFile) {
+      alert("กรุณาอัปโหลดไฟล์ Weights (.pth) สำหรับ Fine-Tuning");
       return;
     }
-    if (!needsPthFile && (!clfFile || !rfeFile)) {
+    if (isNeuralNetwork && (!weightFile || !rfeFile)) {
+      alert(
+        "กรุณาอัปโหลดไฟล์ Weights (.pth) และ RFE Selector (.pkl) ให้ครบถ้วน",
+      );
+      return;
+    }
+    if (isHybridML && (!clfFile || !rfeFile)) {
       alert(
         "กรุณาอัปโหลดไฟล์ Classifier (.pkl) และ RFE Selector (.pkl) ให้ครบถ้วน",
       );
       return;
     }
+
     if (useGroundTruth && !csvFile) {
       alert("กรุณาอัปโหลดไฟล์เฉลย CSV");
       return;
     }
 
-    const currentFileName = needsPthFile
-      ? weightFile?.name || ""
-      : clfFile?.name || "";
+    const currentFileName =
+      isFineTuning || isNeuralNetwork
+        ? weightFile?.name || ""
+        : clfFile?.name || "";
+
     setLastRunConfig({ backbone, classifier, fileName: currentFileName });
 
     for (const task of targetTasks) {
@@ -171,12 +183,11 @@ export default function Home() {
       formData.append("filter_type", filterType);
       formData.append("gt_option", useGroundTruth ? "upload" : "none");
 
-      if (needsPthFile && weightFile)
+      // 🌟 แนบไฟล์เข้า API อย่างถูกต้อง
+      if ((isFineTuning || isNeuralNetwork) && weightFile)
         formData.append("weight_file", weightFile);
-      if (!needsPthFile) {
-        if (clfFile) formData.append("clf_file", clfFile);
-        if (rfeFile) formData.append("rfe_file", rfeFile);
-      }
+      if (isHybridML && clfFile) formData.append("clf_file", clfFile);
+      if (!isFineTuning && rfeFile) formData.append("rfe_file", rfeFile);
       if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
       try {
@@ -258,7 +269,6 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-800 dark:text-gray-100 transition-colors duration-200">
-      {/* Header Bar */}
       <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-950 sticky top-0 z-30 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div className="flex items-center space-x-3">
@@ -304,14 +314,12 @@ export default function Home() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
-        {/* Left Column: Control Panel */}
         <div className="lg:col-span-4 space-y-6">
           <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 space-y-5">
             <h2 className="text-lg font-semibold flex items-center gap-2 border-b border-gray-100 dark:border-gray-700 pb-3">
               ⚙️ การตั้งค่าระบบ
             </h2>
 
-            {/* Backbone */}
             <div>
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
                 Backbone Architecture
@@ -326,7 +334,6 @@ export default function Home() {
               </select>
             </div>
 
-            {/* Classifier */}
             <div>
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
                 Classifier Algorithm / Approach
@@ -345,7 +352,6 @@ export default function Home() {
               </select>
             </div>
 
-            {/* Filter */}
             <div>
               <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
                 Image Preprocessing Filter
@@ -361,7 +367,6 @@ export default function Home() {
               </select>
             </div>
 
-            {/* Ground Truth Toggle Switch */}
             <div className="pt-2 border-t border-gray-100 dark:border-gray-700">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-xs font-medium text-gray-700 dark:text-gray-300">
@@ -399,9 +404,10 @@ export default function Home() {
               )}
             </div>
 
-            {/* File Upload Inputs (สลับช่องอัปโหลดอัตโนมัติระหว่าง .pth และ .pkl) */}
+            {/* 🌟 File Upload Inputs (แก้ให้ตรงเงื่อนไขแล้ว) 🌟 */}
             <div className="space-y-3 pt-2 border-t border-gray-100 dark:border-gray-700">
-              {needsPthFile ? (
+              {/* โชว์ช่อง Weights ถ้าเป็น Fine-Tuning หรือ NeuralNetwork */}
+              {(isFineTuning || isNeuralNetwork) && (
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
                     ไฟล์ Weights (.pth) *
@@ -413,36 +419,40 @@ export default function Home() {
                     className="w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-900/30 dark:file:text-blue-400 hover:file:bg-blue-100 cursor-pointer"
                   />
                 </div>
-              ) : (
-                <>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-                      ไฟล์ Classifier (.pkl) *
-                    </label>
-                    <input
-                      type="file"
-                      accept=".pkl"
-                      onChange={(e) => setClfFile(e.target.files?.[0] || null)}
-                      className="w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-900/30 dark:file:text-blue-400 hover:file:bg-blue-100 cursor-pointer"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
-                      ไฟล์ RFE Selector (.pkl) *
-                    </label>
-                    <input
-                      type="file"
-                      accept=".pkl"
-                      onChange={(e) => setRfeFile(e.target.files?.[0] || null)}
-                      className="w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-900/30 dark:file:text-blue-400 hover:file:bg-blue-100 cursor-pointer"
-                    />
-                  </div>
-                </>
+              )}
+
+              {/* โชว์ช่อง Classifier ถ้าเป็น Machine Learning (ไม่ใช่ FT และ NN) */}
+              {isHybridML && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                    ไฟล์ Classifier (.pkl) *
+                  </label>
+                  <input
+                    type="file"
+                    accept=".pkl"
+                    onChange={(e) => setClfFile(e.target.files?.[0] || null)}
+                    className="w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-900/30 dark:file:text-blue-400 hover:file:bg-blue-100 cursor-pointer"
+                  />
+                </div>
+              )}
+
+              {/* โชว์ช่อง RFE สำหรับทุกตัวที่ไม่ได้เป็น Fine-Tuning */}
+              {!isFineTuning && (
+                <div>
+                  <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
+                    ไฟล์ RFE Selector (.pkl) *
+                  </label>
+                  <input
+                    type="file"
+                    accept=".pkl"
+                    onChange={(e) => setRfeFile(e.target.files?.[0] || null)}
+                    className="w-full text-xs text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 dark:file:bg-blue-900/30 dark:file:text-blue-400 hover:file:bg-blue-100 cursor-pointer"
+                  />
+                </div>
               )}
             </div>
           </div>
 
-          {/* Action Area */}
           <div className="space-y-4">
             <label
               onDragOver={handleDragOver}
@@ -480,7 +490,6 @@ export default function Home() {
               />
             </label>
 
-            {/* Smart Button */}
             <button
               onClick={() => processAllTasks(idleCount === 0)}
               disabled={tasks.length === 0 || isProcessingAny}
@@ -513,7 +522,6 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right Column: Dashboard & Prediction List */}
         <div className="lg:col-span-8 space-y-6">
           {totalEval > 0 && (
             <div className="bg-white dark:bg-gray-800 p-6 rounded-2xl shadow-sm border border-gray-200 dark:border-gray-700 space-y-4">
@@ -699,7 +707,7 @@ export default function Home() {
                         <div className="space-y-0.5">
                           <p className="font-bold text-blue-600 dark:text-blue-400">
                             ผลทำนาย: {task.result.prediction_class} (ความมั่นใจ{" "}
-                            {task.result.confidence})
+                            {task.result.confidence * 100} %)
                           </p>
 
                           {task.result.eval_status !== "ไม่มีเฉลย" && (
