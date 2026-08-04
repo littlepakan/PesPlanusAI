@@ -118,7 +118,6 @@ export default function Home() {
     setTasks([]);
   };
 
-  // 🌟 เงื่อนไขเช็คประเภทของ Classifier ให้ชัดเจนขึ้น
   const isFineTuning = classifier === "Fine-Tuning";
   const isNeuralNetwork = classifier === "NeuralNetwork";
   const isHybridML = !isFineTuning && !isNeuralNetwork;
@@ -135,7 +134,6 @@ export default function Home() {
 
     if (targetTasks.length === 0) return;
 
-    // 🌟 แจ้งเตือนการอัปโหลดไฟล์ให้ตรงกับแต่ละโหมด
     if (isFineTuning && !weightFile) {
       alert("กรุณาอัปโหลดไฟล์ Weights (.pth) สำหรับ Fine-Tuning");
       return;
@@ -162,84 +160,101 @@ export default function Home() {
       isFineTuning || isNeuralNetwork
         ? weightFile?.name || ""
         : clfFile?.name || "";
-
     setLastRunConfig({ backbone, classifier, fileName: currentFileName });
 
-    for (const task of targetTasks) {
-      const controller = new AbortController();
+    const controller = new AbortController();
+
+    // ตั้งสถานะเป็น processing ทั้งหมดทันที
+    setTasks((prev) =>
+      prev.map((t) =>
+        targetTasks.some((tt) => tt.id === t.id)
+          ? { ...t, status: "processing", controller, result: undefined }
+          : t,
+      ),
+    );
+
+    const formData = new FormData();
+
+    // 🌟 ยัดไฟล์ภาพทั้งหมดลงไปใน FormData ครั้งเดียว!
+    targetTasks.forEach((task) => {
+      formData.append("files", task.file);
+    });
+
+    formData.append("backbone", backbone);
+    formData.append("classifier", classifier);
+    formData.append("filter_type", filterType);
+    formData.append("gt_option", useGroundTruth ? "upload" : "none");
+
+    if ((isFineTuning || isNeuralNetwork) && weightFile)
+      formData.append("weight_file", weightFile);
+    if (isHybridML && clfFile) formData.append("clf_file", clfFile);
+    if (!isFineTuning && rfeFile) formData.append("rfe_file", rfeFile);
+    if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
+
+    // 🌟 ดึง URL จาก Environment Variable ถ้าตั้งไว้ หรือ fallback เป็น Render URL (เพื่อความยืดหยุ่น)
+    const API_URL =
+      process.env.NEXT_PUBLIC_API_URL || "https://pes-planus-api.onrender.com";
+
+    try {
+      const response = await fetch(`${API_URL}/api/predict`, {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(
+          errData.detail || `HTTP error! status: ${response.status}`,
+        );
+      }
+
+      // 🌟 รับผลลัพธ์มาเป็น Array แล้วจับคู่ด้วยชื่อไฟล์
+      const dataArray = await response.json();
 
       setTasks((prev) =>
-        prev.map((t) =>
-          t.id === task.id
-            ? { ...t, status: "processing", controller, result: undefined }
-            : t,
-        ),
+        prev.map((t) => {
+          if (targetTasks.some((tt) => tt.id === t.id)) {
+            const res = dataArray.find((r: any) => r.filename === t.file.name);
+            if (res)
+              return {
+                ...t,
+                status: "success",
+                result: res,
+                controller: undefined,
+              };
+            return {
+              ...t,
+              status: "error",
+              result: { error: "ไม่ได้รับผลลัพธ์จากเซิร์ฟเวอร์" },
+              controller: undefined,
+            };
+          }
+          return t;
+        }),
       );
-
-      const formData = new FormData();
-      formData.append("file", task.file);
-      formData.append("backbone", backbone);
-      formData.append("classifier", classifier);
-      formData.append("filter_type", filterType);
-      formData.append("gt_option", useGroundTruth ? "upload" : "none");
-
-      // 🌟 แนบไฟล์เข้า API อย่างถูกต้อง
-      if ((isFineTuning || isNeuralNetwork) && weightFile)
-        formData.append("weight_file", weightFile);
-      if (isHybridML && clfFile) formData.append("clf_file", clfFile);
-      if (!isFineTuning && rfeFile) formData.append("rfe_file", rfeFile);
-      if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
-
-      try {
-        const response = await fetch(
-          "https://pes-planus-api.onrender.com/api/predict",
-          {
-            // const response = await fetch("http://localhost:8000/api/predict", {
-            method: "POST",
-            body: formData,
-            signal: controller.signal,
-          },
-        );
-
-        if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          throw new Error(
-            errData.detail || `HTTP error! status: ${response.status}`,
-          );
-        }
-
-        const data = await response.json();
-
+    } catch (error: any) {
+      if (error.name === "AbortError") {
         setTasks((prev) =>
           prev.map((t) =>
-            t.id === task.id
-              ? { ...t, status: "success", result: data, controller: undefined }
+            targetTasks.some((tt) => tt.id === t.id)
+              ? { ...t, status: "cancelled", controller: undefined }
               : t,
           ),
         );
-      } catch (error: any) {
-        if (error.name === "AbortError") {
-          setTasks((prev) =>
-            prev.map((t) =>
-              t.id === task.id
-                ? { ...t, status: "cancelled", controller: undefined }
-                : t,
-            ),
-          );
-        } else {
-          setTasks((prev) =>
-            prev.map((t) =>
-              t.id === task.id
-                ? {
-                    ...t,
-                    status: "error",
-                    result: { error: error.message },
-                    controller: undefined,
-                  }
-                : t,
-            ),
-          );
-        }
+      } else {
+        setTasks((prev) =>
+          prev.map((t) =>
+            targetTasks.some((tt) => tt.id === t.id)
+              ? {
+                  ...t,
+                  status: "error",
+                  result: { error: error.message },
+                  controller: undefined,
+                }
+              : t,
+          ),
+        );
       }
     }
   };
@@ -408,9 +423,7 @@ export default function Home() {
               )}
             </div>
 
-            {/* 🌟 File Upload Inputs (แก้ให้ตรงเงื่อนไขแล้ว) 🌟 */}
             <div className="space-y-3 pt-2 border-t border-gray-100 dark:border-gray-700">
-              {/* โชว์ช่อง Weights ถ้าเป็น Fine-Tuning หรือ NeuralNetwork */}
               {(isFineTuning || isNeuralNetwork) && (
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
@@ -425,7 +438,6 @@ export default function Home() {
                 </div>
               )}
 
-              {/* โชว์ช่อง Classifier ถ้าเป็น Machine Learning (ไม่ใช่ FT และ NN) */}
               {isHybridML && (
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
@@ -440,7 +452,6 @@ export default function Home() {
                 </div>
               )}
 
-              {/* โชว์ช่อง RFE สำหรับทุกตัวที่ไม่ได้เป็น Fine-Tuning */}
               {!isFineTuning && (
                 <div>
                   <label className="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">
@@ -711,7 +722,7 @@ export default function Home() {
                         <div className="space-y-0.5">
                           <p className="font-bold text-blue-600 dark:text-blue-400">
                             ผลทำนาย: {task.result.prediction_class} (ความมั่นใจ{" "}
-                            {task.result.confidence * 100} %)
+                            {(task.result.confidence * 100).toFixed(2)}%)
                           </p>
 
                           {task.result.eval_status !== "ไม่มีเฉลย" && (
