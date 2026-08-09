@@ -57,26 +57,49 @@ global_state = {
 }
 
 def parse_csv_dataframe(df: pd.DataFrame):
-    df.columns = [str(c).strip().lower() for c in df.columns]
-    img_col = next((col for col in ['img_name', 'img', 'filename', 'image_name', 'name', 'path'] if col in df.columns), None)
-    label_col = next((col for col in ['label', 'imglabel', 'classification', 'class'] if col in df.columns), None)
+    # คลีนชื่อคอลัมน์: แปลงตัวพิมพ์เล็ก, ตัดช่องว่าง และลบ newline เผื่อมีซ่อนอยู่
+    df.columns = [str(c).strip().replace('\n', '').lower() for c in df.columns]
     
+    # เจาะจงคอลัมน์ตามโครงสร้าง CSV ใหม่ (แบบเดิม)
+    img_col = 'img_name' if 'img_name' in df.columns else None
+    
+    # มองหาคอลัมน์ label ก่อน ถ้าไม่มีให้ใช้ label_bin หรือ patient_label ตามลำดับ
+    label_col = None
+    for col in ['label', 'label_bin', 'patient_label']:
+        if col in df.columns:
+            label_col = col
+            break
+            
     gt_map = {}
     if img_col and label_col:
         for _, row in df.iterrows():
-            if pd.isna(row[img_col]) or pd.isna(row[label_col]): continue
+            if pd.isna(row[img_col]) or pd.isna(row[label_col]): 
+                continue
+                
             rname = str(row[img_col]).strip().lower()
             b_rname = os.path.splitext(rname)[0]
             raw_lbl = str(row[label_col]).strip().lower()
             
-            if raw_lbl in ['1', '1.0', 'flatfoot', 'pesplanus', 'pes planus', 'true']: lbl = 1
-            elif raw_lbl in ['0', '0.0', 'normal', 'false']: lbl = 0
+            # แปลงค่า label ให้เป็น 0 (Normal) หรือ 1 (Pes Planus)
+            if raw_lbl in ['1', '1.0', 'flatfoot', 'pesplanus', 'pes planus', 'true']: 
+                lbl = 1
+            elif raw_lbl in ['0', '0.0', 'normal', 'false']: 
+                lbl = 0
             else:
-                try: lbl = int(float(raw_lbl))
-                except ValueError: continue
+                try: 
+                    lbl = int(float(raw_lbl))
+                except ValueError: 
+                    continue
             
+            # บันทึก Map เฉลย (รองรับทั้งแบบมีและไม่มีนามสกุลไฟล์)
             gt_map[rname] = lbl
             gt_map[b_rname] = lbl
+            
+            # เผื่อกรณีไฟล์รูปที่ทดสอบมีนามสกุลติดมาด้วย
+            gt_map[f"{b_rname}.png"] = lbl
+            gt_map[f"{b_rname}.jpg"] = lbl
+            gt_map[f"{b_rname}.jpeg"] = lbl
+            
     return gt_map
 
 def apply_preprocessing(img, filter_type: str):
