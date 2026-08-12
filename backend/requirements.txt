@@ -3,8 +3,8 @@ uvicorn
 python-multipart
 torch
 torchvision
-# ระบุเวอร์ชันให้ตรงกับเครื่อง Local ของคุณ หรือใช้ตัวนี้เพื่อกัน NumPy 2.0
 numpy==2.5.1
 scikit-learn==1.9.0
 pillow
 pandas
+opencv-python-headless

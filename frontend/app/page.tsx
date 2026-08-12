@@ -11,6 +11,11 @@ type PredictionResult = {
   eval_status: string;
 };
 
+// ✨ 1. ประกาศตัวแปรเก็บ Base URL ไว้ด้านบนสุด (นอก Component หรือในคอมโพเนนต์ก็ได้)
+// ถ้ามีไฟล์ .env ก็จะดึงจาก .env มาใช้ แต่ถ้าไม่มีก็จะใช้ URL ของ Render เป็นค่าเริ่มต้น
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL || "https://pesplanusai.onrender.com";
+
 export default function Home() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -34,12 +39,13 @@ export default function Home() {
   useEffect(() => {
     const wakeUpServer = async () => {
       try {
-        const response = await fetch("https://pesplanusai.onrender.com/");
+        // ✨ 2. แก้มาใช้ API_BASE_URL
+        const response = await fetch(`${API_BASE_URL}/`);
         if (response.ok) {
           setIsServerReady(true);
-          setShowSuccessBanner(true); // ✨ 1. เปิดโชว์ป้ายสีเขียว
+          setShowSuccessBanner(true); // เปิดโชว์ป้ายสีเขียว
 
-          // ✨ 2. ตั้งเวลาให้ซ่อนป้ายอัตโนมัติใน 4 วินาที (4000 ms)
+          // ตั้งเวลาให้ซ่อนป้ายอัตโนมัติใน 4 วินาที (4000 ms)
           setTimeout(() => {
             setShowSuccessBanner(false);
           }, 4000);
@@ -102,8 +108,8 @@ export default function Home() {
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
     try {
-      // const res = await fetch("http://127.0.0.1:8000/api/predict", {
-      const res = await fetch("https://pesplanusai.onrender.com/api/predict", {
+      // ✨ 3. แก้มาใช้ API_BASE_URL ตรงนี้ด้วย
+      const res = await fetch(`${API_BASE_URL}/api/predict`, {
         method: "POST",
         body: formData,
       });
