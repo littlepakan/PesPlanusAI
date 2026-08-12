@@ -13,7 +13,6 @@ from PIL import Image, ImageFile
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
-import xgboost
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -155,19 +154,20 @@ async def predict_single_image(
         prediction_result = int(ml_model.predict(features)[0])
         prob = float(prediction_result)
 
+        # --- คำนวณค่าความมั่นใจ (Confidence Score) ---
+        prob = 0.0
         if hasattr(ml_model, "predict_proba"):
             try:
                 prob = float(ml_model.predict_proba(features)[0][1])
-            except Exception as e:
-                if "validate_features" in str(e) and "XGB" in type(ml_model).__name__:
-                    dtest = xgboost.DMatrix(features)
-                    prob_raw = ml_model.get_booster().predict(dtest)
-                    prob = float(prob_raw[0])
-                else:
-                    prob = float(prediction_result)
+            except Exception:
+                # กรณีโมเดลไม่มีค่าความมั่นใจให้ดึง จะคืนค่าตามผลลัพธ์ (0.0 หรือ 1.0)
+                prob = float(prediction_result)
         elif hasattr(ml_model, "decision_function"):
+            # สำหรับโมเดลตระกูล SVM บางตัวที่ไม่ได้เปิดโหมด probability=True
             df_val = ml_model.decision_function(features)[0]
             prob = float(1 / (1 + np.exp(-df_val)))
+        else:
+            prob = float(prediction_result)
 
         fname = str(file.filename).strip().lower()
         bname = os.path.splitext(fname)[0]
