@@ -3,14 +3,13 @@ import gc
 import io
 import os
 import pickle
-import tempfile  # <-- เพิ่ม import tempfile
-from typing import List, Optional
+from typing import Optional
 
 import cv2
 import joblib
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageFile  # <-- เพิ่ม ImageFile
+from PIL import Image, ImageFile
 import torch
 import torch.nn as nn
 from torchvision import models, transforms
@@ -18,8 +17,7 @@ import xgboost
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
-# --- ตั้งค่าการอ่านรูปภาพ ---
-# ป้องกัน Error รูปภาพสูญหายหรือถูกตัดทอนระหว่างการส่งผ่าน HTTP FormData
+# ป้องกัน Error รูปภาพสูญหายหรือถูกตัดทอน
 ImageFile.LOAD_TRUNCATED_IMAGES = True 
 
 app = FastAPI(title="Pes Planus AI API")
@@ -39,13 +37,13 @@ def read_root():
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# 📌 กำหนดชื่อไฟล์โมเดลที่วางอยู่บนเซิร์ฟเวอร์ (ต้องเอาไฟล์นี้มาวางคู่กับ api.py)
+MODEL_PATH = "model.pkl" 
+
 model_lock = asyncio.Lock()
 global_state = {
-    "model_key": None,
     "feature_extractor": None,
-    "ft_model": None,
     "ml_model": None,
-    "rfe": None,
     "csv_key": None,
     "gt_map": {},
 }
@@ -85,162 +83,57 @@ def parse_csv_dataframe(df: pd.DataFrame):
             gt_map[f"{b_rname}.jpeg"] = lbl
     return gt_map
 
-def apply_preprocessing(img, filter_type: str):
-    if filter_type == "Median Filter":
-        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        median_img = cv2.medianBlur(img_cv, 3)
-        return Image.fromarray(cv2.cvtColor(median_img, cv2.COLOR_BGR2RGB))
-    elif filter_type == "Gaussian Blur":
-        img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        blur_img = cv2.GaussianBlur(img_cv, (3, 3), 0)
-        return Image.fromarray(cv2.cvtColor(blur_img, cv2.COLOR_BGR2RGB))
-    return img
+def apply_median_filter(img):
+    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    median_img = cv2.medianBlur(img_cv, 3)
+    return Image.fromarray(cv2.cvtColor(median_img, cv2.COLOR_BGR2RGB))
 
-def get_transforms(backbone: str, filter_type: str):
-    IMG_SIZE = 224 if backbone == "GoogleNet" else 227
+def get_transforms():
     return transforms.Compose([
-        transforms.Lambda(lambda img: apply_preprocessing(img, filter_type)),
-        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.Lambda(apply_median_filter),
+        transforms.Resize((227, 227)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
 
+class SqueezeNetExtractor(nn.Module):
+    def __init__(self):
+        super().__init__()
+        orig = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.DEFAULT)
+        self.features = orig.features
+        self.pool = nn.AdaptiveAvgPool2d((1, 1))
+
+    def forward(self, x):
+        return torch.flatten(self.pool(self.features(x)), 1)
+
+# 🟢 Endpoint สำหรับรับภาพมาวิเคราะห์
 @app.post("/api/predict")
-async def predict_batch_images(
-    files: List[UploadFile] = File(...),
-    backbone: str = Form(...),
-    classifier: str = Form(...),
-    filter_type: str = Form("Median Filter"),
+async def predict_single_image(
+    file: UploadFile = File(...),
     gt_option: str = Form("none"),
-    weight_file: Optional[UploadFile] = File(None),  # สำหรับ Fine-Tuning (.pth)
-    clf_file: Optional[UploadFile] = File(None),     # สำหรับ ML Models (.pkl)
-    rfe_file: Optional[UploadFile] = File(None),     # สำหรับ ML Models (.pkl)
     csv_file: Optional[UploadFile] = File(None),
 ):
     try:
         async with model_lock:
-            clf_target = classifier.strip().lower().replace(" ", "")
-
-            # ------------------------------------------------------------------
-            # โหมดที่ 1: Fine-Tuning (.pth ไฟล์เดียว)
-            # ------------------------------------------------------------------
-            if clf_target in ["fine-tuning", "finetuning", "ft"]:
-                if not weight_file:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="กรุณาอัปโหลดไฟล์ Weights (.pth) สำหรับ Fine-Tuning"
-                    )
-
-                current_key = f"FT_{backbone}_{weight_file.filename}"
-                if global_state["model_key"] != current_key:
-                    w_bytes = await weight_file.read()
-                    
-                    if backbone == "GoogleNet":
-                        model = models.googlenet(aux_logits=False)
-                        model.fc = nn.Linear(1024, 2)
-                    else:
-                        model = models.squeezenet1_1()
-                        model.classifier = nn.Sequential(
-                            nn.Dropout(p=0.5),
-                            nn.Conv2d(512, 2, kernel_size=(1, 1)),
-                            nn.ReLU(inplace=True),
-                            nn.AdaptiveAvgPool2d((1, 1)),
-                            nn.Flatten()
-                        )
-
+            # 1. โหลด ML Model จากไฟล์ในเซิร์ฟเวอร์ (ถ้ายังไม่ได้โหลด)
+            if global_state["ml_model"] is None:
+                if not os.path.exists(MODEL_PATH):
+                    raise HTTPException(status_code=500, detail=f"ไม่พบไฟล์โมเดล '{MODEL_PATH}' บนเซิร์ฟเวอร์ กรุณาตรวจสอบว่ามีไฟล์นี้อยู่คู่กับ api.py")
+                try:
+                    global_state["ml_model"] = joblib.load(MODEL_PATH)
+                except Exception:
                     try:
-                        model.load_state_dict(
-                            torch.load(io.BytesIO(w_bytes), map_location=device, weights_only=False)
-                        )
+                        with open(MODEL_PATH, "rb") as f:
+                            global_state["ml_model"] = pickle.load(f)
                     except Exception as e:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"โหลดไฟล์ .pth ไม่สำเร็จ อาจไม่ตรงกับ Backbone [{backbone}]: {str(e)}"
-                        )
+                        raise HTTPException(status_code=500, detail=f"ไฟล์ Model (.pkl) เสียหาย: {str(e)}")
 
-                    global_state["ft_model"] = model.to(device).eval()
-                    global_state["model_key"] = current_key
+            # 2. โหลด Feature Extractor (ถ้ายังไม่ได้โหลด)
+            if global_state["feature_extractor"] is None:
+                feat_ext = SqueezeNetExtractor()
+                global_state["feature_extractor"] = feat_ext.to(device).eval()
 
-            # ------------------------------------------------------------------
-            # โหมดที่ 2: ML Models / Classical Classifiers (.pkl 2 ไฟล์)
-            # ------------------------------------------------------------------
-            else:
-                if not clf_file or not rfe_file:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="กรุณาอัปโหลดไฟล์ Classifier / Model (.pkl) และ RFE Selector (.pkl) ให้ครบถ้วน"
-                    )
-
-                current_key = f"ML_{backbone}_{clf_target}_{clf_file.filename}_{rfe_file.filename}"
-                if global_state["model_key"] != current_key:
-                    clf_bytes = await clf_file.read()
-                    rfe_bytes = await rfe_file.read()
-
-                    clf_tmp_path = None
-                    rfe_tmp_path = None
-
-                    try:
-                        # สร้างไฟล์ชั่วคราวเพื่อให้ Joblib อ่านจาก File System โดยตรง (แก้ปัญหา stream corrupted)
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as f_clf:
-                            f_clf.write(clf_bytes)
-                            clf_tmp_path = f_clf.name
-                            
-                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pkl") as f_rfe:
-                            f_rfe.write(rfe_bytes)
-                            rfe_tmp_path = f_rfe.name
-
-                        # โหลด Classifier (.pkl)
-                        try:
-                            global_state["ml_model"] = joblib.load(clf_tmp_path)
-                        except Exception:
-                            try:
-                                global_state["ml_model"] = pickle.loads(clf_bytes)
-                            except Exception as e:
-                                raise HTTPException(
-                                    status_code=400,
-                                    detail=f"ไฟล์โมเดล (.pkl) เสียหายหรือไม่สามารถแกะไฟล์ได้: {str(e)}"
-                                )
-
-                        # โหลด RFE Selector (.pkl)
-                        try:
-                            global_state["rfe"] = joblib.load(rfe_tmp_path)
-                        except Exception:
-                            try:
-                                global_state["rfe"] = pickle.loads(rfe_bytes)
-                            except Exception as e:
-                                raise HTTPException(
-                                    status_code=400,
-                                    detail=f"ไฟล์ RFE Selector (.pkl) เสียหาย: {str(e)}"
-                                )
-                                
-                    finally:
-                        # ลบไฟล์ชั่วคราวเพื่อคืนพื้นที่
-                        if clf_tmp_path and os.path.exists(clf_tmp_path):
-                            os.remove(clf_tmp_path)
-                        if rfe_tmp_path and os.path.exists(rfe_tmp_path):
-                            os.remove(rfe_tmp_path)
-
-                    # โหลด Feature Extractor ตาม Backbone
-                    if backbone == "GoogleNet":
-                        feat_ext = models.googlenet(weights=models.GoogLeNet_Weights.DEFAULT)
-                        feat_ext.fc = nn.Identity()
-                    else:
-                        class SqueezeNetExtractor(nn.Module):
-                            def __init__(self):
-                                super().__init__()
-                                orig = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.DEFAULT)
-                                self.features = orig.features
-                                self.pool = nn.AdaptiveAvgPool2d((1, 1))
-
-                            def forward(self, x):
-                                return torch.flatten(self.pool(self.features(x)), 1)
-
-                        feat_ext = SqueezeNetExtractor()
-
-                    global_state["feature_extractor"] = feat_ext.to(device).eval()
-                    global_state["model_key"] = current_key
-
-            # --- จัดการ CSV Ground Truth ---
+            # 3. จัดการไฟล์ CSV (ถ้าอัปโหลดมา)
             if gt_option == "upload" and csv_file:
                 if global_state["csv_key"] != f"upload_{csv_file.filename}":
                     df_gt = pd.read_csv(io.BytesIO(await csv_file.read()))
@@ -250,82 +143,63 @@ async def predict_batch_images(
                 global_state["gt_map"] = {}
                 global_state["csv_key"] = "none"
 
-        # ======================================================================
-        # การทำนายผล (Prediction Loop)
-        # ======================================================================
-        results = []
-        for file in files:
-            contents = await file.read()
-            image = Image.open(io.BytesIO(contents)).convert("RGB")
-            img_tensor = get_transforms(backbone, filter_type)(image).unsqueeze(0).to(device)
+        contents = await file.read()
+        image = Image.open(io.BytesIO(contents)).convert("RGB")
+        img_tensor = get_transforms()(image).unsqueeze(0).to(device)
 
-            if clf_target in ["fine-tuning", "finetuning", "ft"]:
-                with torch.no_grad():
-                    outputs = global_state["ft_model"](img_tensor)
-                    _, preds = torch.max(outputs.data, 1)
-                    prob = torch.softmax(outputs, dim=1)[:, 1].item()
-                    prediction_result = preds.item()
-            else:
-                with torch.no_grad():
-                    features = global_state["feature_extractor"](img_tensor).cpu().numpy()
+        with torch.no_grad():
+            features = global_state["feature_extractor"](img_tensor).cpu().numpy()
 
-                features_opt = global_state["rfe"].transform(features)
-                ml_model = global_state["ml_model"]
+        ml_model = global_state["ml_model"]
 
-                prediction_result = int(ml_model.predict(features_opt)[0])
-                prob = float(prediction_result)
+        prediction_result = int(ml_model.predict(features)[0])
+        prob = float(prediction_result)
 
-                if hasattr(ml_model, "predict_proba"):
-                    try:
-                        prob = float(ml_model.predict_proba(features_opt)[0][1])
-                    except Exception as e:
-                        if "validate_features" in str(e) and "XGB" in type(ml_model).__name__:
-                            dtest = xgboost.DMatrix(features_opt)
-                            prob_raw = ml_model.get_booster().predict(dtest)
-                            prob = float(prob_raw[0])
-                        else:
-                            prob = float(prediction_result)
-                elif hasattr(ml_model, "decision_function"):
-                    df_val = ml_model.decision_function(features_opt)[0]
-                    prob = float(1 / (1 + np.exp(-df_val)))
+        if hasattr(ml_model, "predict_proba"):
+            try:
+                prob = float(ml_model.predict_proba(features)[0][1])
+            except Exception as e:
+                if "validate_features" in str(e) and "XGB" in type(ml_model).__name__:
+                    dtest = xgboost.DMatrix(features)
+                    prob_raw = ml_model.get_booster().predict(dtest)
+                    prob = float(prob_raw[0])
+                else:
+                    prob = float(prediction_result)
+        elif hasattr(ml_model, "decision_function"):
+            df_val = ml_model.decision_function(features)[0]
+            prob = float(1 / (1 + np.exp(-df_val)))
 
-            # เทียบเฉลย Ground Truth
-            fname = str(file.filename).strip().lower()
-            bname = os.path.splitext(fname)[0]
-            gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
+        fname = str(file.filename).strip().lower()
+        bname = os.path.splitext(fname)[0]
+        gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
 
-            eval_status = "ไม่มีเฉลย"
-            if gt_label is not None:
-                if gt_label == 1 and prediction_result == 1:
-                    eval_status = "True Positive (TP)"
-                elif gt_label == 0 and prediction_result == 0:
-                    eval_status = "True Negative (TN)"
-                elif gt_label == 0 and prediction_result == 1:
-                    eval_status = "False Positive (FP)"
-                elif gt_label == 1 and prediction_result == 0:
-                    eval_status = "False Negative (FN)"
+        eval_status = "ไม่มีเฉลย"
+        if gt_label is not None:
+            if gt_label == 1 and prediction_result == 1:
+                eval_status = "True Positive (TP)"
+            elif gt_label == 0 and prediction_result == 0:
+                eval_status = "True Negative (TN)"
+            elif gt_label == 0 and prediction_result == 1:
+                eval_status = "False Positive (FP)"
+            elif gt_label == 1 and prediction_result == 0:
+                eval_status = "False Negative (FN)"
 
-            results.append({
-                "id": file.filename,
-                "filename": file.filename,
-                "prediction_class": "Pes Planus (1)" if prediction_result == 1 else "Normal (0)",
-                "prediction_code": prediction_result,
-                "confidence": prob,
-                "ground_truth": "Pes Planus (1)" if gt_label == 1 else ("Normal (0)" if gt_label == 0 else "-"),
-                "eval_status": eval_status,
-            })
+        result = {
+            "id": file.filename,
+            "filename": file.filename,
+            "prediction_class": "Pes Planus (ภาวะเท้าแบน)" if prediction_result == 1 else "Normal (ปกติ)",
+            "prediction_code": prediction_result,
+            "confidence": prob,
+            "ground_truth": "Pes Planus (1)" if gt_label == 1 else ("Normal (0)" if gt_label == 0 else "-"),
+            "eval_status": eval_status,
+        }
 
-            # เคลียร์ RAM
-            if "img_tensor" in locals(): del img_tensor
-            if "features" in locals(): del features
-            if "features_opt" in locals(): del features_opt
-            if "outputs" in locals(): del outputs
-
+        del img_tensor, features
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        return results
+        return result
 
     except HTTPException:
         raise
