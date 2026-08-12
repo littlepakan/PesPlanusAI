@@ -102,7 +102,8 @@ export default function Home() {
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/predict", {
+      // const res = await fetch("http://127.0.0.1:8000/api/predict", {
+      const res = await fetch("https://pesplanusai.onrender.com/api/predict", {
         method: "POST",
         body: formData,
       });
