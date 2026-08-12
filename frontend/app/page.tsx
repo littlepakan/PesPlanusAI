@@ -31,19 +31,34 @@ export default function Home() {
   const [theme, setTheme] = useState<"light" | "dark" | "system">("system");
 
   const API_BASE_URL = "https://pesplanusai.onrender.com";
-  // const API_BASE_URL = "http://localhost:8000";
 
-  // 1. สำหรับปลุก Backend ตอนโหลดหน้าเว็บครั้งแรก (Run once)
+  // ข้อมูลผู้จัดทำ 3 คน
+  const developers = [
+    {
+      name: "นายปกานต์ วงษ์ท่าเรือ",
+      role: "นักศึกษา/ผู้พัฒนา",
+      image: "p.png",
+    },
+    {
+      name: "ผศ.ดร. สุวิมล มรรควิบูลย์ชัย",
+      role: "อาจารย์ที่ปรึกษา",
+      image: "s.png",
+    },
+    {
+      name: "ผศ.ดร. ไก้รุ่ง เฮงพระพรหม",
+      role: "อาจารย์ที่ปรึกษา",
+      image: "k.png",
+    },
+  ];
+
   useEffect(() => {
     const wakeUpServer = async () => {
       try {
-        // ✨ ใช้ API_BASE_URL แทน Hardcoded URL
         const response = await fetch(`${API_BASE_URL}/`);
         if (response.ok) {
           setIsServerReady(true);
-          setShowSuccessBanner(true); // ✨ เปิดโชว์ป้ายสีเขียว
+          setShowSuccessBanner(true);
 
-          // ✨ ตั้งเวลาให้ซ่อนป้ายอัตโนมัติใน 4 วินาที (4000 ms)
           setTimeout(() => {
             setShowSuccessBanner(false);
           }, 4000);
@@ -58,7 +73,6 @@ export default function Home() {
     wakeUpServer();
   }, []);
 
-  // 2. สำหรับสลับธีม Dark / Light (Run when 'theme' changes)
   useEffect(() => {
     const isDark =
       theme === "dark" ||
@@ -106,7 +120,6 @@ export default function Home() {
     if (useGroundTruth && csvFile) formData.append("csv_file", csvFile);
 
     try {
-      // ✨ ใช้ API_BASE_URL แทน Hardcoded URL
       const res = await fetch(`${API_BASE_URL}/api/predict`, {
         method: "POST",
         body: formData,
@@ -142,8 +155,9 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200 font-sans">
-      <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-800 sticky top-0 z-30 shadow-sm">
+    /* ✨ จุดสำคัญที่ 1: บังคับความสูงเต็มจอแบบ min-h-[100dvh] + flex flex-col */
+    <div className="min-h-[100dvh] bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100 transition-colors duration-200 font-sans flex flex-col">
+      <header className="border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-800 sticky top-0 z-30 shadow-sm flex-shrink-0">
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
           <div
             onClick={() => window.location.reload()}
@@ -195,12 +209,12 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* ✨ เพิ่ม UI แจ้งเตือนสถานะเซิร์ฟเวอร์ไว้ด้านบนสุด หรือใต้ Header */}
-        <div className="max-w-4xl mx-auto pt-4 px-4">
-          {
-            isWakingUp ? (
-              // ป้ายสีเหลือง: กำลังปลุก (แสดงค้างไว้จนกว่าจะตื่น)
+      {/* ✨ จุดสำคัญที่ 2: ใช้ flex-1 เพื่อขยายพื้นที่ส่วนกลาง ดัน Footer ลงล่างเสมอ */}
+      <main className="flex-1 max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
+        {/* UI แจ้งเตือนสถานะเซิร์ฟเวอร์ */}
+        {(isWakingUp || !isServerReady || showSuccessBanner) && (
+          <div className="max-w-4xl mx-auto pt-4 px-4 mb-8">
+            {isWakingUp ? (
               <div className="bg-yellow-100 border-l-4 border-yellow-500 text-yellow-700 p-4 rounded shadow-sm flex items-center animate-pulse">
                 <span className="text-xl mr-3">⏳</span>
                 <p className="text-sm font-medium">
@@ -209,7 +223,6 @@ export default function Home() {
                 </p>
               </div>
             ) : !isServerReady ? (
-              // ป้ายสีแดง: เชื่อมต่อไม่ได้
               <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-3 rounded shadow-sm flex items-center">
                 <span className="text-xl mr-3">⚠️</span>
                 <p className="text-sm font-medium">
@@ -218,19 +231,19 @@ export default function Home() {
                 </p>
               </div>
             ) : showSuccessBanner ? (
-              // ✨ ป้ายสีเขียว: พร้อมใช้งาน (จะแสดงแค่ 4 วินาที แล้วหายวับไป)
               <div className="bg-green-100 border-l-4 border-green-500 text-green-700 p-3 rounded shadow-sm flex items-center transition-all duration-500 ease-in-out">
                 <span className="text-xl mr-3">🚀</span>
                 <p className="text-sm font-medium">
                   เซิร์ฟเวอร์ AI พร้อมใช้งานแล้ว!
                 </p>
               </div>
-            ) : null /* ✨ คืนค่า null เพื่อให้พื้นที่ตรงนี้หายไปเนียนๆ เมื่อหมดเวลา */
-          }
-        </div>
+            ) : null}
+          </div>
+        )}
+
         {!previewUrl ? (
-          // ================= STATE 1: ยังไม่อัปโหลดรูปภาพ =================
-          <div className="max-w-2xl mx-auto mt-10">
+          /* STATE 1: ยังไม่อัปโหลดรูปภาพ */
+          <div className="max-w-2xl mx-auto my-auto py-6">
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -243,7 +256,7 @@ export default function Home() {
                 if (e.dataTransfer.files?.[0])
                   handleFileSelect(e.dataTransfer.files[0]);
               }}
-              className={`border-2 border-dashed rounded-3xl p-16 text-center transition-all duration-300 cursor-pointer bg-white dark:bg-gray-800 shadow-sm flex flex-col items-center justify-center ${
+              className={`border-2 border-dashed rounded-3xl p-12 text-center transition-all duration-300 cursor-pointer bg-white dark:bg-gray-800 shadow-sm flex flex-col items-center justify-center ${
                 isDragging
                   ? "border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 scale-[0.98]"
                   : "border-gray-300 dark:border-gray-700 hover:border-blue-400 hover:shadow-md"
@@ -283,9 +296,8 @@ export default function Home() {
             </div>
           </div>
         ) : (
-          // ================= STATE 2: อัปโหลดรูปภาพแล้ว =================
+          /* STATE 2: อัปโหลดรูปภาพแล้ว */
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 lg:gap-8">
-            {/* ---------------- ฝั่งซ้าย: รูปภาพและแผงควบคุม ---------------- */}
             <div className="lg:col-span-5 flex flex-col space-y-4">
               <div className="bg-white dark:bg-gray-800 rounded-2xl p-4 border border-gray-200 dark:border-gray-700 shadow-sm">
                 <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-gray-100 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 group flex items-center justify-center">
@@ -404,7 +416,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* ---------------- ฝั่งขวา: พื้นที่แสดงผลลัพธ์ ---------------- */}
             <div className="lg:col-span-7 flex flex-col">
               <div className="bg-white dark:bg-gray-800 rounded-2xl p-6 lg:p-8 border border-gray-200 dark:border-gray-700 shadow-sm flex-grow flex flex-col">
                 <h3 className="font-bold text-lg border-b border-gray-100 dark:border-gray-700 pb-4 mb-6 flex items-center gap-2 text-gray-800 dark:text-gray-100">
@@ -501,6 +512,55 @@ export default function Home() {
           </div>
         )}
       </main>
+
+      {/* ✨ จุดสำคัญที่ 3: Footer ล็อคชิดขอบล่างเสมอด้วย flex-shrink-0 */}
+      <footer className="w-full border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-800 flex-shrink-0 mt-auto">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+          <p className="text-center text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">
+            พัฒนาโดย
+          </p>
+
+          {/* Grid แสดงผู้จัดทำ 3 คน */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            {developers.map((dev, index) => (
+              <div
+                key={index}
+                className="flex items-center space-x-3 p-2.5 rounded-xl bg-gray-50 dark:bg-gray-900/40 border border-gray-100 dark:border-gray-700/50"
+              >
+                <div className="w-12 h-12 rounded-full border-2 border-gray-200 dark:border-gray-700 overflow-hidden flex-shrink-0 bg-gray-100 dark:bg-gray-800">
+                  <img
+                    src={dev.image}
+                    alt={dev.name}
+                    className="w-full h-full object-cover"
+                    onError={(e: any) => {
+                      e.target.style.display = "none";
+                      e.target.parentNode.innerHTML = `<div class="w-full h-full flex items-center justify-center text-lg">👤</div>`;
+                    }}
+                  />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="font-bold text-sm text-gray-900 dark:text-white truncate">
+                    {dev.name}
+                  </h4>
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                    {dev.role}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="border-t border-gray-100 dark:border-gray-700/60 pt-4 flex flex-col sm:flex-row items-center justify-between text-xs text-gray-500 dark:text-gray-400 gap-2 text-center sm:text-left">
+            <p>
+              สาขาวิชาวิทยาการคอมพิวเตอร์ คณะวิทยาศาสตร์และเทคโนโลยี
+              มหาวิทยาลัยราชภัฏนครปฐม
+            </p>
+            <p className="font-medium">
+              © {new Date().getFullYear()} PesPlanusWebAI NPRU-CS
+            </p>
+          </div>
+        </div>
+      </footer>
 
       {/* Fullscreen Image Modal */}
       {fullscreenImage && (
