@@ -1,27 +1,10 @@
---extra-index-url https://download.pytorch.org/whl/cpu
-
-# ==========================================
-# 🧠 AI & Machine Learning (CPU Only Version)
-# ==========================================
-torch==2.2.2+cpu
-torchvision==0.17.2+cpu
-xgboost==2.0.3
-scikit-learn==1.4.1.post1
-
-# ==========================================
-# 🚀 API Backend & Server 
-# ==========================================
-fastapi==0.110.0
-uvicorn==0.28.0
-pydantic==2.6.4
-python-multipart==0.0.9
-
-# ==========================================
-# 📊 Data Processing & Image Handling
-# ==========================================
-pandas==2.2.1
-numpy==1.26.4
-pillow==10.2.0
-
-# 🌟 สำคัญ: ใช้ headless เพื่อตัดระบบ GUI ของ OpenCV ทิ้ง ช่วยประหยัด RAM บน Linux Server
-opencv-python-headless==4.9.0.80
+fastapi
+uvicorn
+python-multipart
+torch
+torchvision
+# ระบุเวอร์ชันให้ตรงกับเครื่อง Local ของคุณ หรือใช้ตัวนี้เพื่อกัน NumPy 2.0
+numpy==2.5.1
+scikit-learn==1.9.0
+pillow
+pandas
