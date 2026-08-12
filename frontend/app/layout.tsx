@@ -13,7 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PesPlanusAI WebApp",
+  title:
+    "เว็บแอปพลิเคชันเพื่อจำแนกโรคเท้าแบนจากภาพเอ็กซเรย์ด้วยตัวแบบการเรียนรู้ด้วยเครื่องและการเรียนรู้เชิงลึก",
   description: "เว็บแอปพลิเคชันสำหรับทำนายโรคเท้าแบนโดยใช้ AI",
 };
 
