@@ -556,7 +556,7 @@ export default function Home() {
               มหาวิทยาลัยราชภัฏนครปฐม
             </p>
             <p className="font-medium">
-              © {new Date().getFullYear()} PesPlanusWebAI NPRU-CS
+              © {new Date().getFullYear()} PesPlanusWebAppAI NPRU-CS
             </p>
           </div>
         </div>
