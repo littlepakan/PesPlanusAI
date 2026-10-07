@@ -2,16 +2,15 @@ import asyncio
 import gc
 import io
 import os
-import pickle
 from typing import Optional
 
-import cv2
-import joblib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageFile
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models, transforms
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # ป้องกัน Error รูปภาพสูญหายหรือถูกตัดทอน
 ImageFile.LOAD_TRUNCATED_IMAGES = True 
 
-app = FastAPI(title="Pes Planus AI API")
+app = FastAPI(title="Pes Planus AI API (DenseNet-201)")
 
 # --- ตั้งค่า CORS ---
 app.add_middleware(
@@ -32,17 +31,17 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"message": "Pes Planus API is running perfectly!"}
+    return {"message": "Pes Planus DenseNet-201 API is running perfectly!"}
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 📌 กำหนดชื่อไฟล์โมเดลที่วางอยู่บนเซิร์ฟเวอร์ (ต้องเอาไฟล์นี้มาวางคู่กับ api.py)
-MODEL_PATH = "model.pkl" 
+# 📌 กำหนดชื่อไฟล์โมเดล DenseNet-201 ที่วางอยู่บนเซิร์ฟเวอร์
+MODEL_PATH = "ens_arch_densenet201.pt" 
 
 model_lock = asyncio.Lock()
 global_state = {
-    "feature_extractor": None,
-    "ml_model": None,
+    "model": None,
+    "checkpoint": None,
     "csv_key": None,
     "gt_map": {},
 }
@@ -82,28 +81,25 @@ def parse_csv_dataframe(df: pd.DataFrame):
             gt_map[f"{b_rname}.jpeg"] = lbl
     return gt_map
 
-def apply_median_filter(img):
-    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    median_img = cv2.medianBlur(img_cv, 3)
-    return Image.fromarray(cv2.cvtColor(median_img, cv2.COLOR_BGR2RGB))
+def build_ft_model(name, pretrained=False):
+    """ฟังก์ชันสร้างโครงสร้างโมเดล (รองรับทั้ง DenseNet และอื่นๆ เผื่ออนาคต)"""
+    m = models.get_model(name, weights="DEFAULT" if pretrained else None)
+    if name.startswith("densenet"):
+        m.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(m.classifier.in_features, 2))
+    elif name.startswith("efficientnet"):
+        m.classifier[1] = nn.Linear(m.classifier[1].in_features, 2)
+    else:
+        raise ValueError(f"ไม่รู้จักโมเดล: {name}")
+    return m
 
-def get_transforms():
-    return transforms.Compose([
-        transforms.Lambda(apply_median_filter),
-        transforms.Resize((227, 227)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-class SqueezeNetExtractor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        orig = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.DEFAULT)
-        self.features = orig.features
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-
-    def forward(self, x):
-        return torch.flatten(self.pool(self.features(x)), 1)
+def load_single_model(filepath):
+    """ฟังก์ชันโหลดโมเดลและ Metadata จากไฟล์ .pt"""
+    ck = torch.load(filepath, map_location=device, weights_only=False)
+    m = build_ft_model(ck["arch"], pretrained=False)
+    m.load_state_dict(ck["state_dict"])
+    m.to(device)
+    m.eval()
+    return m, ck
 
 # 🟢 Endpoint สำหรับรับภาพมาวิเคราะห์
 @app.post("/api/predict")
@@ -114,25 +110,18 @@ async def predict_single_image(
 ):
     try:
         async with model_lock:
-            # 1. โหลด ML Model จากไฟล์ในเซิร์ฟเวอร์ (ถ้ายังไม่ได้โหลด)
-            if global_state["ml_model"] is None:
+            # 1. โหลด Model .pt จากเซิร์ฟเวอร์ (ถ้ายังไม่ได้โหลด)
+            if global_state["model"] is None:
                 if not os.path.exists(MODEL_PATH):
-                    raise HTTPException(status_code=500, detail=f"ไม่พบไฟล์โมเดล '{MODEL_PATH}' บนเซิร์ฟเวอร์ กรุณาตรวจสอบว่ามีไฟล์นี้อยู่คู่กับ api.py")
-                try:
-                    global_state["ml_model"] = joblib.load(MODEL_PATH)
-                except Exception:
-                    try:
-                        with open(MODEL_PATH, "rb") as f:
-                            global_state["ml_model"] = pickle.load(f)
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=f"ไฟล์ Model (.pkl) เสียหาย: {str(e)}")
+                    raise HTTPException(
+                        status_code=500, 
+                        detail=f"ไม่พบไฟล์โมเดล '{MODEL_PATH}' บนเซิร์ฟเวอร์ กรุณาอัปโหลดไฟล์มาวางคู่กับ api.py"
+                    )
+                m, ck = load_single_model(MODEL_PATH)
+                global_state["model"] = m
+                global_state["checkpoint"] = ck
 
-            # 2. โหลด Feature Extractor (ถ้ายังไม่ได้โหลด)
-            if global_state["feature_extractor"] is None:
-                feat_ext = SqueezeNetExtractor()
-                global_state["feature_extractor"] = feat_ext.to(device).eval()
-
-            # 3. จัดการไฟล์ CSV (ถ้าอัปโหลดมา)
+            # 2. จัดการไฟล์ CSV (ถ้าอัปโหลดมา)
             if gt_option == "upload" and csv_file:
                 if global_state["csv_key"] != f"upload_{csv_file.filename}":
                     df_gt = pd.read_csv(io.BytesIO(await csv_file.read()))
@@ -142,33 +131,33 @@ async def predict_single_image(
                 global_state["gt_map"] = {}
                 global_state["csv_key"] = "none"
 
+        # 3. เตรียมรูปภาพ
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        img_tensor = get_transforms()(image).unsqueeze(0).to(device)
-
+        
+        m = global_state["model"]
+        ck = global_state["checkpoint"]
+        
+        # 4. แปลงรูปภาพตาม Metadata ที่ถูกเซฟไว้ใน .pt (DenseNet = 224x224)
+        tfm = transforms.Compose([
+            transforms.Resize((ck["img_size"], ck["img_size"])),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=ck["mean"], std=ck["std"])
+        ])
+        
+        x = tfm(image).unsqueeze(0).to(device)
+        
+        # 5. วิเคราะห์และทำนายผล
         with torch.no_grad():
-            features = global_state["feature_extractor"](img_tensor).cpu().numpy()
+            # ใช้ Test-Time Augmentation (TTA) พลิกภาพแนวนอนเหมือนตอนประเมินผลในโน้ตบุ๊ค
+            p = (F.softmax(m(x).float(), 1) + F.softmax(m(torch.flip(x, dims=[3])).float(), 1)) / 2
+            prob = float(p[0, 1].item())
 
-        ml_model = global_state["ml_model"]
+        # 6. ตัดสินผลลัพธ์ด้วย Threshold ที่เซฟมา (ปกติคือ 0.5)
+        thr = ck.get("threshold", 0.5)
+        prediction_result = 1 if prob >= thr else 0
 
-        prediction_result = int(ml_model.predict(features)[0])
-        prob = float(prediction_result)
-
-        # --- คำนวณค่าความมั่นใจ (Confidence Score) ---
-        prob = 0.0
-        if hasattr(ml_model, "predict_proba"):
-            try:
-                prob = float(ml_model.predict_proba(features)[0][1])
-            except Exception:
-                # กรณีโมเดลไม่มีค่าความมั่นใจให้ดึง จะคืนค่าตามผลลัพธ์ (0.0 หรือ 1.0)
-                prob = float(prediction_result)
-        elif hasattr(ml_model, "decision_function"):
-            # สำหรับโมเดลตระกูล SVM บางตัวที่ไม่ได้เปิดโหมด probability=True
-            df_val = ml_model.decision_function(features)[0]
-            prob = float(1 / (1 + np.exp(-df_val)))
-        else:
-            prob = float(prediction_result)
-
+        # --- ตรวจสอบกับ Ground Truth (เฉลย) ---
         fname = str(file.filename).strip().lower()
         bname = os.path.splitext(fname)[0]
         gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
@@ -194,7 +183,7 @@ async def predict_single_image(
             "eval_status": eval_status,
         }
 
-        del img_tensor, features
+        # เคลียร์หน่วยความจำ
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
