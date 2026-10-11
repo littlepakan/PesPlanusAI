@@ -34,7 +34,7 @@ app.add_middleware(
 # ==============================================================
 MODEL_URL = os.getenv(
     "MODEL_URL",
-    "https://github.com/littlepakan/PesPlanusAI2/releases/download/v1.0.0/ens_arch_densenet201.pt",
+    "https://github.com/littlepakan/PesPlanusAI/releases/download/v0.1.0/ens_arch_densenet201.pt",
 )
 MODEL_PATH = os.getenv("MODEL_PATH", "ens_arch_densenet201.pt")
 IMG_SIZE = int(os.getenv("IMG_SIZE", "224"))                  # ต้องตรงกับตอนเทรน
