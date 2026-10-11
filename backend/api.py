@@ -152,22 +152,27 @@ async def predict_single_image(
         ml_model = global_state["ml_model"]
 
         prediction_result = int(ml_model.predict(features)[0])
-        prob = float(prediction_result)
-
+        
         # --- คำนวณค่าความมั่นใจ (Confidence Score) ---
-        prob = 0.0
+        prob_class_1 = 0.0
         if hasattr(ml_model, "predict_proba"):
             try:
-                prob = float(ml_model.predict_proba(features)[0][1])
+                prob_class_1 = float(ml_model.predict_proba(features)[0][1])
             except Exception:
                 # กรณีโมเดลไม่มีค่าความมั่นใจให้ดึง จะคืนค่าตามผลลัพธ์ (0.0 หรือ 1.0)
-                prob = float(prediction_result)
+                prob_class_1 = float(prediction_result)
         elif hasattr(ml_model, "decision_function"):
             # สำหรับโมเดลตระกูล SVM บางตัวที่ไม่ได้เปิดโหมด probability=True
             df_val = ml_model.decision_function(features)[0]
-            prob = float(1 / (1 + np.exp(-df_val)))
+            prob_class_1 = float(1 / (1 + np.exp(-df_val)))
         else:
-            prob = float(prediction_result)
+            prob_class_1 = float(prediction_result)
+
+        # ✨ กลับค่าความเชื่อมั่นตามคลาสที่ทำนายได้
+        if prediction_result == 1:
+            final_confidence = prob_class_1
+        else:
+            final_confidence = 1.0 - prob_class_1
 
         fname = str(file.filename).strip().lower()
         bname = os.path.splitext(fname)[0]
@@ -189,7 +194,7 @@ async def predict_single_image(
             "filename": file.filename,
             "prediction_class": "Pes Planus (ภาวะเท้าแบน)" if prediction_result == 1 else "Normal (ปกติ)",
             "prediction_code": prediction_result,
-            "confidence": prob,
+            "confidence": final_confidence,
             "ground_truth": "Pes Planus (1)" if gt_label == 1 else ("Normal (0)" if gt_label == 0 else "-"),
             "eval_status": eval_status,
         }
