@@ -2,11 +2,10 @@ import asyncio
 import gc
 import io
 import os
-import pickle
+import urllib.request
 from typing import Optional
 
 import cv2
-import joblib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageFile
@@ -17,7 +16,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 # ป้องกัน Error รูปภาพสูญหายหรือถูกตัดทอน
-ImageFile.LOAD_TRUNCATED_IMAGES = True 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 app = FastAPI(title="Pes Planus AI API")
 
@@ -30,23 +29,164 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Pes Planus API is running perfectly!"}
+# ==============================================================
+# ⚙️ การตั้งค่า (ปรับผ่าน Environment Variable ได้ ไม่ต้องแก้โค้ด)
+# ==============================================================
+MODEL_URL = os.getenv(
+    "MODEL_URL",
+    "https://github.com/littlepakan/PesPlanusAI2/releases/download/v1.0.0/ens_arch_densenet201.pt",
+)
+MODEL_PATH = os.getenv("MODEL_PATH", "ens_arch_densenet201.pt")
+IMG_SIZE = int(os.getenv("IMG_SIZE", "224"))                  # ต้องตรงกับตอนเทรน
+USE_MEDIAN_FILTER = os.getenv("USE_MEDIAN_FILTER", "1") == "1"  # ต้องตรงกับตอนเทรน
+THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))              # threshold ของคลาส Pes Planus
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# 📌 กำหนดชื่อไฟล์โมเดลที่วางอยู่บนเซิร์ฟเวอร์ (ต้องเอาไฟล์นี้มาวางคู่กับ api.py)
-MODEL_PATH = "model.pkl" 
-
 model_lock = asyncio.Lock()
 global_state = {
-    "feature_extractor": None,
-    "ml_model": None,
+    "models": None,   # list ของ DenseNet201 (1 ตัว หรือหลายตัวถ้าเป็น ensemble)
     "csv_key": None,
     "gt_map": {},
 }
 
+
+@app.get("/")
+def read_root():
+    return {"message": "Pes Planus API is running perfectly!"}
+
+
+# ==============================================================
+# 📦 โหลดโมเดล DenseNet201
+# ==============================================================
+def download_model_if_needed():
+    if os.path.exists(MODEL_PATH):
+        return
+    tmp_path = MODEL_PATH + ".part"
+    try:
+        print(f"⬇️  กำลังดาวน์โหลดโมเดลจาก {MODEL_URL} ...")
+        req = urllib.request.Request(MODEL_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=300) as resp, open(tmp_path, "wb") as out:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        os.replace(tmp_path, MODEL_PATH)
+        print("✅ ดาวน์โหลดโมเดลเสร็จแล้ว")
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
+def _clean_state_dict(sd: dict) -> dict:
+    cleaned = {}
+    for k, v in sd.items():
+        for prefix in ("module.", "model.", "backbone."):
+            if k.startswith(prefix):
+                k = k[len(prefix):]
+        cleaned[k] = v
+    return cleaned
+
+
+def _is_state_dict(obj) -> bool:
+    return isinstance(obj, dict) and len(obj) > 0 and all(torch.is_tensor(v) for v in obj.values())
+
+
+def _collect(obj) -> list:
+    """ดึง nn.Module หรือ state_dict ทุกอันออกจากไฟล์ .pt (รองรับ ensemble หลายโมเดล)"""
+    if isinstance(obj, nn.Module):
+        return [obj]
+    if _is_state_dict(obj):
+        return [obj]
+    items = []
+    if isinstance(obj, (list, tuple)):
+        for o in obj:
+            items += _collect(o)
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            if isinstance(v, (dict, list, tuple, nn.Module)):
+                items += _collect(v)
+    return items
+
+
+def _build_densenet201_from_state(sd: dict) -> nn.Module:
+    sd = _clean_state_dict(sd)
+    if "features.conv0.weight" not in sd:
+        raise ValueError("state_dict นี้ไม่ใช่ของ DenseNet")
+
+    w_key = next((k for k in sd if k.startswith("classifier") and k.endswith("weight")), None)
+    if w_key is None:
+        raise ValueError("ไม่พบ classifier weight ใน state_dict")
+
+    num_out = sd[w_key].shape[0]
+    net = models.densenet201(weights=None)
+    if w_key == "classifier.weight":
+        net.classifier = nn.Linear(1920, num_out)
+    elif w_key == "classifier.1.weight":
+        net.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(1920, num_out))
+    else:
+        raise ValueError(f"โครงสร้าง classifier ไม่รองรับ: {w_key}")
+
+    net.load_state_dict(sd, strict=True)
+    return net
+
+
+def load_models() -> list:
+    download_model_if_needed()
+
+    try:
+        obj = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+    except Exception:
+        # ไฟล์ที่เซฟทั้งโมเดล (torch.save(model)) ต้องใช้ weights_only=False
+        # ⚠️ ใช้กับไฟล์ที่เชื่อถือได้เท่านั้น
+        obj = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
+
+    loaded = []
+    for item in _collect(obj):
+        if isinstance(item, nn.Module):
+            net = item
+        else:
+            try:
+                net = _build_densenet201_from_state(item)
+            except ValueError:
+                continue  # ข้าม state_dict ที่ไม่ใช่โมเดล (เช่น optimizer)
+        loaded.append(net.to(device).eval())
+
+    if not loaded:
+        raise RuntimeError("ไม่พบโมเดล DenseNet201 ในไฟล์ .pt")
+    print(f"✅ โหลดโมเดลสำเร็จ {len(loaded)} ตัว บน {device}")
+    return loaded
+
+
+# ==============================================================
+# 🖼️ Pre-processing
+# ==============================================================
+def apply_median_filter(img):
+    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+    median_img = cv2.medianBlur(img_cv, 3)
+    return Image.fromarray(cv2.cvtColor(median_img, cv2.COLOR_BGR2RGB))
+
+
+def get_transforms():
+    steps = []
+    if USE_MEDIAN_FILTER:
+        steps.append(transforms.Lambda(apply_median_filter))
+    steps += [
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ]
+    return transforms.Compose(steps)
+
+
+_transform = get_transforms()
+
+
+# ==============================================================
+# 📄 CSV เฉลย
+# ==============================================================
 def parse_csv_dataframe(df: pd.DataFrame):
     df.columns = [str(c).strip().replace("\n", "").lower() for c in df.columns]
     img_col = "img_name" if "img_name" in df.columns else None
@@ -82,30 +222,10 @@ def parse_csv_dataframe(df: pd.DataFrame):
             gt_map[f"{b_rname}.jpeg"] = lbl
     return gt_map
 
-def apply_median_filter(img):
-    img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    median_img = cv2.medianBlur(img_cv, 3)
-    return Image.fromarray(cv2.cvtColor(median_img, cv2.COLOR_BGR2RGB))
 
-def get_transforms():
-    return transforms.Compose([
-        transforms.Lambda(apply_median_filter),
-        transforms.Resize((227, 227)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ])
-
-class SqueezeNetExtractor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        orig = models.squeezenet1_1(weights=models.SqueezeNet1_1_Weights.DEFAULT)
-        self.features = orig.features
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-
-    def forward(self, x):
-        return torch.flatten(self.pool(self.features(x)), 1)
-
+# ==============================================================
 # 🟢 Endpoint สำหรับรับภาพมาวิเคราะห์
+# ==============================================================
 @app.post("/api/predict")
 async def predict_single_image(
     file: UploadFile = File(...),
@@ -114,25 +234,14 @@ async def predict_single_image(
 ):
     try:
         async with model_lock:
-            # 1. โหลด ML Model จากไฟล์ในเซิร์ฟเวอร์ (ถ้ายังไม่ได้โหลด)
-            if global_state["ml_model"] is None:
-                if not os.path.exists(MODEL_PATH):
-                    raise HTTPException(status_code=500, detail=f"ไม่พบไฟล์โมเดล '{MODEL_PATH}' บนเซิร์ฟเวอร์ กรุณาตรวจสอบว่ามีไฟล์นี้อยู่คู่กับ api.py")
+            # 1. โหลดโมเดล DenseNet201 (ครั้งแรกครั้งเดียว)
+            if global_state["models"] is None:
                 try:
-                    global_state["ml_model"] = joblib.load(MODEL_PATH)
-                except Exception:
-                    try:
-                        with open(MODEL_PATH, "rb") as f:
-                            global_state["ml_model"] = pickle.load(f)
-                    except Exception as e:
-                        raise HTTPException(status_code=500, detail=f"ไฟล์ Model (.pkl) เสียหาย: {str(e)}")
+                    global_state["models"] = await asyncio.to_thread(load_models)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"โหลดโมเดลไม่สำเร็จ: {str(e)}")
 
-            # 2. โหลด Feature Extractor (ถ้ายังไม่ได้โหลด)
-            if global_state["feature_extractor"] is None:
-                feat_ext = SqueezeNetExtractor()
-                global_state["feature_extractor"] = feat_ext.to(device).eval()
-
-            # 3. จัดการไฟล์ CSV (ถ้าอัปโหลดมา)
+            # 2. จัดการไฟล์ CSV (ถ้าอัปโหลดมา)
             if gt_option == "upload" and csv_file:
                 if global_state["csv_key"] != f"upload_{csv_file.filename}":
                     df_gt = pd.read_csv(io.BytesIO(await csv_file.read()))
@@ -144,39 +253,29 @@ async def predict_single_image(
 
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-        img_tensor = get_transforms()(image).unsqueeze(0).to(device)
+        img_tensor = _transform(image).unsqueeze(0).to(device)
 
+        # 3. ทำนาย (เฉลี่ยความน่าจะเป็นถ้ามีหลายโมเดล)
+        probs = []
         with torch.no_grad():
-            features = global_state["feature_extractor"](img_tensor).cpu().numpy()
+            for net in global_state["models"]:
+                logits = net(img_tensor)
+                if logits.shape[1] == 1:
+                    p = torch.sigmoid(logits)[:, 0]
+                else:
+                    p = torch.softmax(logits, dim=1)[:, 1]
+                probs.append(float(p.item()))
+        prob_class_1 = float(np.mean(probs))
 
-        ml_model = global_state["ml_model"]
+        prediction_result = int(prob_class_1 >= THRESHOLD)
+        final_confidence = prob_class_1 if prediction_result == 1 else 1.0 - prob_class_1
 
-        prediction_result = int(ml_model.predict(features)[0])
-        
-        # --- คำนวณค่าความมั่นใจ (Confidence Score) ---
-        prob_class_1 = 0.0
-        if hasattr(ml_model, "predict_proba"):
-            try:
-                prob_class_1 = float(ml_model.predict_proba(features)[0][1])
-            except Exception:
-                # กรณีโมเดลไม่มีค่าความมั่นใจให้ดึง จะคืนค่าตามผลลัพธ์ (0.0 หรือ 1.0)
-                prob_class_1 = float(prediction_result)
-        elif hasattr(ml_model, "decision_function"):
-            # สำหรับโมเดลตระกูล SVM บางตัวที่ไม่ได้เปิดโหมด probability=True
-            df_val = ml_model.decision_function(features)[0]
-            prob_class_1 = float(1 / (1 + np.exp(-df_val)))
-        else:
-            prob_class_1 = float(prediction_result)
-
-        # ✨ กลับค่าความเชื่อมั่นตามคลาสที่ทำนายได้
-        if prediction_result == 1:
-            final_confidence = prob_class_1
-        else:
-            final_confidence = 1.0 - prob_class_1
-
+        # 4. เทียบกับเฉลย
         fname = str(file.filename).strip().lower()
         bname = os.path.splitext(fname)[0]
-        gt_label = global_state["gt_map"].get(fname) or global_state["gt_map"].get(bname)
+        gt_label = global_state["gt_map"].get(fname)
+        if gt_label is None:
+            gt_label = global_state["gt_map"].get(bname)
 
         eval_status = "ไม่มีเฉลย"
         if gt_label is not None:
@@ -199,7 +298,7 @@ async def predict_single_image(
             "eval_status": eval_status,
         }
 
-        del img_tensor, features
+        del img_tensor
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
