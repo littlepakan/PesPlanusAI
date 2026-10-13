@@ -43,9 +43,13 @@ THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))              # threshold ขอ
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# --- ตั้งค่าเพื่อประหยัดทรัพยากร (Render Free: RAM 512MB / CPU น้อย) ---
+torch.set_num_threads(int(os.getenv("TORCH_THREADS", "1")))
+MAX_MODELS = int(os.getenv("MAX_MODELS", "0"))  # 0 = ใช้ทุก fold, เช่น 3 = ใช้แค่ 3 fold แรก
+
 model_lock = asyncio.Lock()
 global_state = {
-    "models": None,   # list ของ EfficientNet-B4 (ensemble หลายตัว เช่น 5 folds)
+    "models": None,   # {"net": EfficientNet-B4 ตัวเดียว, "weights": [state_dict ของแต่ละ fold]}
     "csv_key": None,
     "gt_map": {},
 }
@@ -144,31 +148,37 @@ def _build_efficientnet_b4_from_state(sd: dict) -> nn.Module:
     return net
 
 
-def load_models() -> list:
+def load_models() -> dict:
+    """โหลดแบบประหยัด RAM:
+    - mmap=True  -> น้ำหนักอยู่เป็นไฟล์บนดิสก์ ไม่ถูกก๊อปเข้า RAM ทั้งหมด
+    - สร้างโมเดลจริงแค่ 1 ตัว แล้วสลับน้ำหนักทีละ fold ตอนทำนาย
+    """
     download_model_if_needed()
 
     try:
-        obj = torch.load(MODEL_PATH, map_location="cpu", weights_only=True)
+        obj = torch.load(MODEL_PATH, map_location="cpu", weights_only=True, mmap=True)
     except Exception:
-        # ไฟล์ที่เซฟทั้งโมเดล (torch.save(model)) ต้องใช้ weights_only=False
+        # ไฟล์ที่เซฟทั้งโมเดล (torch.save(model)) ต้องใช้ weights_only=False (กิน RAM มากกว่า)
         # ⚠️ ใช้กับไฟล์ที่เชื่อถือได้เท่านั้น
         obj = torch.load(MODEL_PATH, map_location="cpu", weights_only=False)
 
-    loaded = []
+    weights = []
     for item in _collect(obj):
-        if isinstance(item, nn.Module):
-            net = item
-        else:
-            try:
-                net = _build_efficientnet_b4_from_state(item)
-            except ValueError:
-                continue  # ข้าม state_dict ที่ไม่ใช่โมเดล (เช่น optimizer)
-        loaded.append(net.to(device).eval())
+        sd = item.state_dict() if isinstance(item, nn.Module) else item
+        sd = _clean_state_dict(sd)
+        # ข้าม state_dict ที่ไม่ใช่โมเดล (เช่น optimizer)
+        if "features.0.0.weight" in sd or "conv_stem.weight" in sd:
+            weights.append(sd)
+    del obj
 
-    if not loaded:
+    if not weights:
         raise RuntimeError("ไม่พบโมเดล EfficientNet-B4 ในไฟล์ .pt")
-    print(f"✅ โหลดโมเดลสำเร็จ {len(loaded)} ตัว บน {device}")
-    return loaded
+    if MAX_MODELS > 0:
+        weights = weights[:MAX_MODELS]
+
+    net = _build_efficientnet_b4_from_state(weights[0]).to(device).eval()
+    print(f"✅ โหลดน้ำหนักสำเร็จ {len(weights)} fold (โมเดลในหน่วยความจำ 1 ตัว) บน {device}")
+    return {"net": net, "weights": weights}
 
 
 # ==============================================================
@@ -267,9 +277,13 @@ async def predict_single_image(
         img_tensor = _transform(image).unsqueeze(0).to(device)
 
         # 3. ทำนาย (Soft voting: เฉลี่ยความน่าจะเป็นจากทุกโมเดลใน ensemble)
+        net = global_state["models"]["net"]
         probs = []
         with torch.inference_mode():
-            for net in global_state["models"]:
+            for sd in global_state["models"]["weights"]:
+                # สลับน้ำหนักทีละ fold ลงในโมเดลตัวเดียว (fp16 -> fp32 แปลงให้อัตโนมัติ)
+                # ส่วนนี้ไม่มี await จึงไม่มี request อื่นแทรกกลางคัน
+                net.load_state_dict(sd, strict=True)
                 logits = net(img_tensor)
                 if logits.shape[1] == 1:
                     p = torch.sigmoid(logits)[:, 0]
