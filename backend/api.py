@@ -34,10 +34,10 @@ app.add_middleware(
 # ==============================================================
 MODEL_URL = os.getenv(
     "MODEL_URL",
-    "https://github.com/littlepakan/PesPlanusAI/releases/download/v0.1.0/ens_arch_densenet201.pt",
+    "https://github.com/littlepakan/PesPlanusAI/releases/download/v0.3.0/ens_arch_efficientnet_b4.pt",
 )
-MODEL_PATH = os.getenv("MODEL_PATH", "ens_arch_densenet201.pt")
-IMG_SIZE = int(os.getenv("IMG_SIZE", "224"))                  # ต้องตรงกับตอนเทรน
+MODEL_PATH = os.getenv("MODEL_PATH", "ens_arch_efficientnet_b4.pt")
+IMG_SIZE = int(os.getenv("IMG_SIZE", "380"))                  # ต้องตรงกับตอนเทรน (EfficientNet-B4 = 380)
 USE_MEDIAN_FILTER = os.getenv("USE_MEDIAN_FILTER", "1") == "1"  # ต้องตรงกับตอนเทรน
 THRESHOLD = float(os.getenv("THRESHOLD", "0.5"))              # threshold ของคลาส Pes Planus
 
@@ -45,7 +45,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model_lock = asyncio.Lock()
 global_state = {
-    "models": None,   # list ของ DenseNet201 (1 ตัว หรือหลายตัวถ้าเป็น ensemble)
+    "models": None,   # list ของ EfficientNet-B4 (ensemble หลายตัว เช่น 5 folds)
     "csv_key": None,
     "gt_map": {},
 }
@@ -57,7 +57,7 @@ def read_root():
 
 
 # ==============================================================
-# 📦 โหลดโมเดล DenseNet201
+# 📦 โหลดโมเดล EfficientNet-B4 (Ensemble)
 # ==============================================================
 def download_model_if_needed():
     if os.path.exists(MODEL_PATH):
@@ -111,23 +111,34 @@ def _collect(obj) -> list:
     return items
 
 
-def _build_densenet201_from_state(sd: dict) -> nn.Module:
+def _build_efficientnet_b4_from_state(sd: dict) -> nn.Module:
     sd = _clean_state_dict(sd)
-    if "features.conv0.weight" not in sd:
-        raise ValueError("state_dict นี้ไม่ใช่ของ DenseNet")
 
     w_key = next((k for k in sd if k.startswith("classifier") and k.endswith("weight")), None)
     if w_key is None:
         raise ValueError("ไม่พบ classifier weight ใน state_dict")
+    num_out, in_feat = sd[w_key].shape[0], sd[w_key].shape[1]
 
-    num_out = sd[w_key].shape[0]
-    net = models.densenet201(weights=None)
-    if w_key == "classifier.weight":
-        net.classifier = nn.Linear(1920, num_out)
-    elif w_key == "classifier.1.weight":
-        net.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(1920, num_out))
+    # --- แบบ torchvision (features.0.0.weight) ---
+    if "features.0.0.weight" in sd:
+        net = models.efficientnet_b4(weights=None)
+        if w_key == "classifier.weight":
+            net.classifier = nn.Linear(in_feat, num_out)
+        elif w_key == "classifier.1.weight":
+            net.classifier = nn.Sequential(nn.Dropout(0.4), nn.Linear(in_feat, num_out))
+        else:
+            raise ValueError(f"โครงสร้าง classifier ไม่รองรับ: {w_key}")
+
+    # --- แบบ timm (conv_stem.weight) ---
+    elif "conv_stem.weight" in sd:
+        try:
+            import timm
+        except ImportError:
+            raise RuntimeError("ไฟล์โมเดลเป็นแบบ timm แต่ยังไม่ได้ติดตั้ง timm (เพิ่ม timm ใน requirements.txt)")
+        net = timm.create_model("efficientnet_b4", pretrained=False, num_classes=num_out)
+
     else:
-        raise ValueError(f"โครงสร้าง classifier ไม่รองรับ: {w_key}")
+        raise ValueError("state_dict นี้ไม่ใช่ของ EfficientNet-B4")
 
     net.load_state_dict(sd, strict=True)
     return net
@@ -149,13 +160,13 @@ def load_models() -> list:
             net = item
         else:
             try:
-                net = _build_densenet201_from_state(item)
+                net = _build_efficientnet_b4_from_state(item)
             except ValueError:
                 continue  # ข้าม state_dict ที่ไม่ใช่โมเดล (เช่น optimizer)
         loaded.append(net.to(device).eval())
 
     if not loaded:
-        raise RuntimeError("ไม่พบโมเดล DenseNet201 ในไฟล์ .pt")
+        raise RuntimeError("ไม่พบโมเดล EfficientNet-B4 ในไฟล์ .pt")
     print(f"✅ โหลดโมเดลสำเร็จ {len(loaded)} ตัว บน {device}")
     return loaded
 
@@ -234,7 +245,7 @@ async def predict_single_image(
 ):
     try:
         async with model_lock:
-            # 1. โหลดโมเดล DenseNet201 (ครั้งแรกครั้งเดียว)
+            # 1. โหลดโมเดล EfficientNet-B4 Ensemble (ครั้งแรกครั้งเดียว)
             if global_state["models"] is None:
                 try:
                     global_state["models"] = await asyncio.to_thread(load_models)
@@ -255,9 +266,9 @@ async def predict_single_image(
         image = Image.open(io.BytesIO(contents)).convert("RGB")
         img_tensor = _transform(image).unsqueeze(0).to(device)
 
-        # 3. ทำนาย (เฉลี่ยความน่าจะเป็นถ้ามีหลายโมเดล)
+        # 3. ทำนาย (Soft voting: เฉลี่ยความน่าจะเป็นจากทุกโมเดลใน ensemble)
         probs = []
-        with torch.no_grad():
+        with torch.inference_mode():
             for net in global_state["models"]:
                 logits = net(img_tensor)
                 if logits.shape[1] == 1:
