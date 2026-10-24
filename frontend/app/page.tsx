@@ -166,11 +166,11 @@ export default function Home() {
             <span className="text-2xl drop-shadow-sm">🦶</span>
             <div>
               <h1 className="font-bold text-sm leading-tight text-gray-900 dark:text-white">
-                เว็บแอปพลิเคชันเพื่อจำแนกโรคเท้าแบนจากภาพเอ็กซเรย์ด้วยตัวแบบการเรียนรู้เชิงลึกแบบผสม
+                เว็บแอปพลิเคชันเพื่อจำแนกโรคเท้าแบนจากภาพเอ็กซเรย์ด้วยตัวแบบการเรียนรู้เชิงลึกแบบผสมv2
               </h1>
               <p className="text-xs text-gray-500 dark:text-gray-400 font-medium">
                 Web-based Application for Flatfoot Classification from X-ray
-                Images Using Hybrid Deep Learning Models
+                Images Using Hybrid Deep Learning Models v2
               </p>
             </div>
           </div>
